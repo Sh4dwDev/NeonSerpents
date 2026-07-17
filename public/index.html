@@ -50,7 +50,7 @@
   <div id="leaderRows"></div>
 </aside>
 
-<div class="version-label">Neon Serpents v1.0.1</div>
+<div class="version-label">Neon Serpents v1.0.3</div>
 
 <div class="overlay" id="menu">
   <div class="card">
@@ -245,7 +245,7 @@
   function updateSegments(s){
     if(!s.segments.length)s.segments.push({x:s.x,y:s.y});
     s.segments[0].x=s.x;s.segments[0].y=s.y;
-    const spacing=Math.max(6.5,s.radius*.8);
+    const spacing=Math.max(7,s.radius*.9);
     for(let i=1;i<s.segments.length;i++){
       const a=s.segments[i-1],b=s.segments[i],dx=a.x-b.x,dy=a.y-b.y,d=Math.hypot(dx,dy)||1;
       b.x=a.x-dx/d*spacing;b.y=a.y-dy/d*spacing;
@@ -330,6 +330,12 @@
       if(data.type==='welcome'){
         const previousPlayer=player;
         playerId=data.id;
+        const spawn=data.spawn||{
+          x:WORLD/2+random(-1200,1200),
+          y:WORLD/2+random(-1200,1200),
+          angle:random(0,Math.PI*2),
+          hue:random(175,220)
+        };
 
         if(previousPlayer && previousPlayer.alive && hasJoined){
           previousPlayer.id=playerId;
@@ -337,11 +343,18 @@
           player=previousPlayer;
         }else{
           player=makeSnake({
-            id:playerId,name:(nameInput.value.trim()||'Player').slice(0,16),
-            x:WORLD/2+random(-900,900),y:WORLD/2+random(-900,900),
-            angle:random(0,Math.PI*2),hue:random(175,220),length:24,radius:10
+            id:playerId,
+            name:(nameInput.value.trim()||'Player').slice(0,16),
+            x:spawn.x,
+            y:spawn.y,
+            angle:spawn.angle,
+            hue:spawn.hue,
+            length:24,
+            radius:10
           },'player');
-          camera.x=player.x;camera.y=player.y;
+
+          camera.x=player.x;
+          camera.y=player.y;
         }
 
         socket.send(JSON.stringify({
@@ -402,7 +415,7 @@
             remotes.set(entity.id,snake);
           }
           snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
-          snake.radius=clamp(entity.radius,10,27);snake.alive=entity.alive!==false;
+          snake.radius=clamp(entity.radius,10.5,29);snake.alive=entity.alive!==false;
           snake.netX=clamp(Number(entity.x)||WORLD/2,35,WORLD-35);
           snake.netY=clamp(Number(entity.y)||WORLD/2,35,WORLD-35);
           snake.netAngle=Number(entity.angle)||0;
@@ -508,30 +521,32 @@
   }
 
   function reportCollision(victim){
-    if(!socket||socket.readyState!==WebSocket.OPEN||!victim.alive)return;
-
-    const body=sampleBody(victim);
-    victim.alive=false;
-
-    // The local player stops immediately instead of waiting for the server.
-    if(victim===player){
-      player.speed=0;
-      input.active=false;
-      input.boost=false;
-      running=false;
-      loopToken+=1;
-      deathSent=true;
-      statusEl.textContent='You died';
-      deathMessage.textContent=`You reached length ${Math.floor(player.length)}. Your mass was dropped as orbs.`;
-      deathScreen.classList.remove('hidden');
-      render(performance.now());
+    // Each browser reports only its own snake's death.
+    // Never report another player or bot as the victim.
+    if(
+      victim!==player ||
+      !socket ||
+      socket.readyState!==WebSocket.OPEN ||
+      !player.alive
+    ){
+      return;
     }
+
+    const body=sampleBody(player);
+    player.alive=false;
+    player.speed=0;
+    input.active=false;
+    input.boost=false;
+    running=false;
+    loopToken+=1;
+    deathSent=true;
+    statusEl.textContent='You died';
+    deathMessage.textContent=`You reached length ${Math.floor(player.length)}. Your mass was dropped as orbs.`;
+    deathScreen.classList.remove('hidden');
+    render(performance.now());
 
     socket.send(JSON.stringify({
       type:'collision',
-      victimId:victim.id,
-      x:victim.x,
-      y:victim.y,
       body
     }));
   }
@@ -581,34 +596,25 @@
   }
 
   function respawn(){
-    if(!socket || socket.readyState!==WebSocket.OPEN){
-      deathScreen.classList.add('hidden');
-      menu.classList.remove('hidden');
-      errorEl.textContent='Connection was lost. Join the lobby again.';
-      return;
+    deathScreen.classList.add('hidden');
+    deathSent=false;
+    running=false;
+    input.active=false;
+    input.boost=false;
+    hasJoined=false;
+
+    if(socket){
+      manualDisconnect=true;
+      try{socket.close(1000,'Respawning');}catch{}
+      socket=null;
     }
 
-    resetPlayerForRespawn();
-    deathScreen.classList.add('hidden');
-    statusEl.textContent='Online';
-    running=true;
-    last=performance.now();
-    lastSend=0;
-
-    socket.send(JSON.stringify({
-      type:'state',
-      name:player.name,
-      x:player.x,
-      y:player.y,
-      angle:player.angle,
-      hue:player.hue,
-      length:player.length,
-      radius:player.radius,
-      alive:true
-    }));
-
-    loopToken+=1;
-    requestAnimationFrame(now=>loop(now,loopToken));
+    manualDisconnect=false;
+    player=null;
+    playerId=null;
+    remotes.clear();
+    statusEl.textContent='Respawning…';
+    connect(false);
   }
 
   function returnToMainMenu(){
@@ -769,29 +775,12 @@
   function checkCollisions(){
     if(!player?.alive)return;
 
-    const snakes=[player,...remotes.values()].filter(snake=>snake.alive);
-
-    // Local player first, so death freezes instantly.
-    for(const bodyOwner of snakes){
-      if(bodyOwner===player)continue;
+    for(const bodyOwner of remotes.values()){
+      if(!bodyOwner.alive)continue;
 
       if(headHitsBody(player,bodyOwner)){
         reportCollision(player);
         return;
-      }
-    }
-
-    // Visible remote entities can also hit other bodies.
-    for(const victim of remotes.values()){
-      if(!victim.alive)continue;
-
-      for(const bodyOwner of snakes){
-        if(bodyOwner===victim||!bodyOwner.alive)continue;
-
-        if(headHitsBody(victim,bodyOwner)){
-          reportCollision(victim);
-          break;
-        }
       }
     }
   }
@@ -815,7 +804,11 @@
     if(player.x<110)player.target=0;if(player.x>WORLD-110)player.target=Math.PI;
     if(player.y<110)player.target=Math.PI/2;if(player.y>WORLD-110)player.target=-Math.PI/2;
     if(boosting)player.length-=dt*1.4;
-    player.radius=clamp(8.5+Math.sqrt(Math.max(15,player.length))*.34,10,27);
+    player.radius=clamp(
+      7.5+Math.sqrt(Math.max(15,player.length))*.75,
+      10.5,
+      29
+    );
     updateSegments(player);
 
     for(const snake of remotes.values()){
@@ -857,7 +850,13 @@
 
     camera.x+=(player.x-camera.x)*Math.min(1,dt*6);
     camera.y+=(player.y-camera.y)*Math.min(1,dt*6);
-    camera.zoom+=(clamp(1.02-player.length/650,.55,1)-camera.zoom)*Math.min(1,dt*3);
+    camera.zoom+=(
+      clamp(
+        1.04-Math.sqrt(Math.max(24,player.length))/48,
+        .48,
+        1
+      )-camera.zoom
+    )*Math.min(1,dt*3);
 
     scoreEl.textContent=score;lengthEl.textContent=Math.floor(player.length);
 
@@ -955,15 +954,15 @@
       )continue;
       const p=worldToScreen(segment.x,segment.y);
       if(p.x<-45||p.y<-45||p.x>W+45||p.y>H+45)continue;
-      const r=radius*clamp((s.segments.length-i)/9,.45,1);
+      const r=radius*clamp((s.segments.length-i)/10,.48,1);
       ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);
       ctx.fillStyle=`hsl(${s.hue},76%,${i%2?46:55}%)`;ctx.fill();
     }
     const head=worldToScreen(s.x,s.y),fx=Math.cos(s.angle),fy=Math.sin(s.angle),sx=-fy,sy=fx;
     for(const side of [-1,1]){
       const ex=head.x+fx*radius*.44+sx*radius*.48*side,ey=head.y+fy*radius*.44+sy*radius*.48*side;
-      ctx.beginPath();ctx.arc(ex,ey,Math.max(2.4,radius*.3),0,7);ctx.fillStyle='#fff';ctx.fill();
-      ctx.beginPath();ctx.arc(ex+fx*radius*.1,ey+fy*radius*.1,Math.max(1.2,radius*.14),0,7);ctx.fillStyle='#111827';ctx.fill();
+      ctx.beginPath();ctx.arc(ex,ey,Math.max(2.6,radius*.32),0,7);ctx.fillStyle='#fff';ctx.fill();
+      ctx.beginPath();ctx.arc(ex+fx*radius*.1,ey+fy*radius*.1,Math.max(1.3,radius*.15),0,7);ctx.fillStyle='#111827';ctx.fill();
     }
     drawLabel(s,head,radius);
   }

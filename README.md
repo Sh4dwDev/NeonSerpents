@@ -107,3 +107,27 @@ Collision reports are detected by clients and accepted by the lobby server. For 
 - Fixed the local player not receiving server-authoritative length growth.
 - Player thickness now updates correctly after eating.
 - Score now increases when server-confirmed growth is received.
+
+
+## v1.0.2 death ownership and spawning fix
+- Fixed both players dying from one successful body collision.
+- A browser can now report only its own snake's death.
+- Clients no longer report deaths for remote players or bots.
+- If a friend's head hits your body, only the friend's browser reports dying.
+- Head-to-head contact remains non-lethal.
+- Initial spawns are selected randomly by the server across the full map.
+- Player spawns avoid nearby living players and bots.
+- Respawning reconnects and receives a new safe random server-selected spawn.
+
+
+## v1.0.3 visible size scaling
+- Reworked the thickness formula so growth is clearly visible.
+- Approximate radius progression:
+  - Length 24: radius 11
+  - Length 100: radius 15
+  - Length 300: radius 20
+  - Length 700: radius 27
+- Larger snakes now have wider segment spacing.
+- Heads, eyes, collisions, and body rendering scale with thickness.
+- Camera zooms out more noticeably as the snake grows.
+- Server and client now use the same size formula.

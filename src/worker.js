@@ -43,7 +43,13 @@ export class GlobalLobby extends DurableObject {
   }
 
   radiusForLength(length) {
-    return clamp(8.5 + Math.sqrt(Math.max(15, length)) * 0.34, 10, 27);
+    // Visible size progression:
+    // ~11 at length 24, ~15 at 100, ~20 at 300, ~27 at 700.
+    return clamp(
+      7.5 + Math.sqrt(Math.max(15, length)) * 0.75,
+      10.5,
+      29
+    );
   }
 
   makeFood(
@@ -460,6 +466,55 @@ export class GlobalLobby extends DurableObject {
     }
   }
 
+
+  findSafePlayerSpawn() {
+    const minDistanceFromPlayers = 900;
+    const minDistanceFromBots = 750;
+
+    for (let attempt = 0; attempt < 80; attempt++) {
+      const x = 500 + Math.random() * (WORLD - 1000);
+      const y = 500 + Math.random() * (WORLD - 1000);
+
+      let safe = true;
+
+      for (const player of this.players.values()) {
+        if (player.alive === false) continue;
+
+        if (Math.hypot(x - player.x, y - player.y) < minDistanceFromPlayers) {
+          safe = false;
+          break;
+        }
+      }
+
+      if (!safe) continue;
+
+      for (const bot of this.bots.values()) {
+        if (bot.alive === false) continue;
+
+        if (Math.hypot(x - bot.x, y - bot.y) < minDistanceFromBots) {
+          safe = false;
+          break;
+        }
+      }
+
+      if (safe) {
+        return {
+          x,
+          y,
+          angle: Math.random() * Math.PI * 2,
+          hue: Math.floor(Math.random() * 360)
+        };
+      }
+    }
+
+    return {
+      x: WORLD / 2 + (Math.random() - 0.5) * 1600,
+      y: WORLD / 2 + (Math.random() - 0.5) * 1600,
+      angle: Math.random() * Math.PI * 2,
+      hue: Math.floor(Math.random() * 360)
+    };
+  }
+
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("WebSocket required", { status: 426 });
@@ -475,14 +530,16 @@ export class GlobalLobby extends DurableObject {
 
     this.ctx.acceptWebSocket(server, [id]);
 
+    const spawn = this.findSafePlayerSpawn();
+
     this.players.set(id, {
       socket: server,
       id,
       name: "Player",
-      x: WORLD / 2 + (Math.random() - 0.5) * 1800,
-      y: WORLD / 2 + (Math.random() - 0.5) * 1800,
-      angle: Math.random() * Math.PI * 2,
-      hue: Math.floor(Math.random() * 360),
+      x: spawn.x,
+      y: spawn.y,
+      angle: spawn.angle,
+      hue: spawn.hue,
       length: START_LENGTH,
       radius: this.radiusForLength(START_LENGTH),
       alive: true,
@@ -494,7 +551,13 @@ export class GlobalLobby extends DurableObject {
     server.send(JSON.stringify({
       type: "welcome",
       id,
-      maxHumans: MAX_HUMANS
+      maxHumans: MAX_HUMANS,
+      spawn: {
+        x: spawn.x,
+        y: spawn.y,
+        angle: spawn.angle,
+        hue: spawn.hue
+      }
     }));
 
     server.send(JSON.stringify(this.roster()));
@@ -538,8 +601,10 @@ export class GlobalLobby extends DurableObject {
       this.eatFood(player);
     }
 
-    if (data.type === "collision" && typeof data.victimId === "string") {
-      this.killEntity(data.victimId, data.body);
+    if (data.type === "collision") {
+      // A client may only report its own death. This prevents two clients
+      // from killing each other from conflicting collision reports.
+      this.killEntity(senderId, data.body);
     }
 
     this.updateBots();
