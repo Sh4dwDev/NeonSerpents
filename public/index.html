@@ -27,6 +27,7 @@
     button { width:100%; margin-top:14px; padding:12px 14px; border:0; border-radius:12px; background:#2bd4f3; color:#031017; font-weight:800; cursor:pointer; }
     .secondary-button { background:#ffffff10; color:#eef5ff; border:1px solid #ffffff1c; }
     .small { font-size:12px; } .hidden { display:none!important; } #error { color:#ff9eae; min-height:18px; }
+    .version-label { position:fixed; left:10px; bottom:8px; color:#7f8ca3; font-size:11px; letter-spacing:.04em; pointer-events:none; }
     @media(max-width:650px){ .leaderboard{width:170px;top:50px}.leader-row{font-size:11px}.optional{display:none}.pill{font-size:12px;padding:6px 8px} }
   </style>
 </head>
@@ -49,6 +50,8 @@
   <div id="leaderRows"></div>
 </aside>
 
+<div class="version-label">Neon Serpents v0.4.0</div>
+
 <div class="overlay" id="menu">
   <div class="card">
     <h1>Neon Serpents</h1>
@@ -61,6 +64,16 @@
   </div>
 </div>
 
+
+
+<div class="overlay hidden" id="reconnectScreen">
+  <div class="card">
+    <h1>Reconnecting…</h1>
+    <p id="reconnectMessage">The connection dropped. Your game is paused while we reconnect.</p>
+    <button id="reconnectNow" type="button">Reconnect now</button>
+    <button id="reconnectMenu" type="button" class="secondary-button">Main menu</button>
+  </div>
+</div>
 
 <div class="overlay hidden" id="deathScreen">
   <div class="card">
@@ -83,6 +96,10 @@
   const deathMessage=document.querySelector('#deathMessage');
   const respawnButton=document.querySelector('#respawn');
   const mainMenuButton=document.querySelector('#mainMenu');
+  const reconnectScreen=document.querySelector('#reconnectScreen');
+  const reconnectMessage=document.querySelector('#reconnectMessage');
+  const reconnectNowButton=document.querySelector('#reconnectNow');
+  const reconnectMenuButton=document.querySelector('#reconnectMenu');
 
   const WORLD=4200, BASE_FOOD=520;
   const input={x:0,y:0,active:false,boost:false};
@@ -90,6 +107,8 @@
   const remotes=new Map();
   let W=innerWidth,H=innerHeight,dpr=1,socket=null,playerId=null,player=null;
   let foods=[],score=0,running=false,last=performance.now(),lastSend=0,deathSent=false;
+  let reconnectTimer=null,reconnectAttempts=0,manualDisconnect=false,hasJoined=false,loopToken=0;
+  const MAX_RECONNECT_DELAY=12000;
 
   const random=(a,b)=>a+Math.random()*(b-a);
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
@@ -147,30 +166,99 @@
     return String(text).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
-  function connect(){
-    errorEl.textContent='';deathSent=false;
+  function clearReconnectTimer(){
+    if(reconnectTimer){
+      clearTimeout(reconnectTimer);
+      reconnectTimer=null;
+    }
+  }
+
+  function reconnectDelay(){
+    const base=Math.min(MAX_RECONNECT_DELAY,750*Math.pow(1.8,reconnectAttempts));
+    return Math.round(base+Math.random()*350);
+  }
+
+  function scheduleReconnect(){
+    if(manualDisconnect || reconnectTimer)return;
+
+    running=false;
+    input.active=false;
+    input.boost=false;
+    statusEl.textContent='Reconnecting…';
+    reconnectScreen.classList.remove('hidden');
+
+    const delay=reconnectDelay();
+    reconnectAttempts+=1;
+    reconnectMessage.textContent=`Connection lost. Retrying in ${(delay/1000).toFixed(1)} seconds…`;
+    reconnectTimer=setTimeout(()=>{
+      reconnectTimer=null;
+      connect(true);
+    },delay);
+  }
+
+  function connect(isReconnect=false){
+    clearReconnectTimer();
+    errorEl.textContent='';
+    deathSent=false;
+    manualDisconnect=false;
     deathScreen.classList.add('hidden');
+
+    if(socket && (socket.readyState===WebSocket.OPEN || socket.readyState===WebSocket.CONNECTING)){
+      try{socket.close(1000,'Replacing connection');}catch{}
+    }
     const protocol=location.protocol==='https:'?'wss:':'ws:';
     socket=new WebSocket(`${protocol}//${location.host}/ws`);
     statusEl.textContent='Connecting…';
 
     socket.addEventListener('open',()=>{
-      statusEl.textContent='Online';menu.classList.add('hidden');
-      foods=Array.from({length:BASE_FOOD},()=>makeFood());
-      running=true;last=performance.now();requestAnimationFrame(loop);
+      reconnectAttempts=0;
+      clearReconnectTimer();
+      statusEl.textContent='Online';
+      menu.classList.add('hidden');
+      reconnectScreen.classList.add('hidden');
+
+      if(!foods.length){
+        foods=Array.from({length:BASE_FOOD},()=>makeFood());
+      }
+
+      hasJoined=true;
+      running=true;
+      last=performance.now();
+      loopToken+=1;
+      requestAnimationFrame(now=>loop(now,loopToken));
     });
 
     socket.addEventListener('message',event=>{
       const data=JSON.parse(event.data);
 
       if(data.type==='welcome'){
+        const previousPlayer=player;
         playerId=data.id;
-        player=makeSnake({
-          id:playerId,name:(nameInput.value.trim()||'Player').slice(0,16),
-          x:WORLD/2+random(-250,250),y:WORLD/2+random(-250,250),
-          angle:random(0,Math.PI*2),hue:random(175,220),length:24,radius:10
-        },'player');
-        camera.x=player.x;camera.y=player.y;
+
+        if(previousPlayer && previousPlayer.alive && hasJoined){
+          previousPlayer.id=playerId;
+          previousPlayer.name=(nameInput.value.trim()||previousPlayer.name||'Player').slice(0,16);
+          player=previousPlayer;
+        }else{
+          player=makeSnake({
+            id:playerId,name:(nameInput.value.trim()||'Player').slice(0,16),
+            x:WORLD/2+random(-250,250),y:WORLD/2+random(-250,250),
+            angle:random(0,Math.PI*2),hue:random(175,220),length:24,radius:10
+          },'player');
+          camera.x=player.x;camera.y=player.y;
+        }
+
+        socket.send(JSON.stringify({
+          type:'state',
+          name:player.name,
+          x:player.x,
+          y:player.y,
+          angle:player.angle,
+          hue:player.hue,
+          length:player.length,
+          radius:player.radius,
+          alive:player.alive
+        }));
       }
 
       if(data.type==='snapshot'){
@@ -211,15 +299,37 @@
 
     socket.addEventListener('close',event=>{
       running=false;
+      loopToken+=1;
+
+      if(manualDisconnect)return;
+      if(!deathScreen.classList.contains('hidden'))return;
+
       statusEl.textContent='Disconnected';
-      if(!deathScreen.classList.contains('hidden')) return;
-      menu.classList.remove('hidden');
-      errorEl.textContent=event.code===1006?'Connection lost. Press Join to reconnect.':'Disconnected.';
+
+      if(hasJoined){
+        scheduleReconnect();
+      }else{
+        menu.classList.remove('hidden');
+        errorEl.textContent=event.code===1006?'Could not connect. Press Join to retry.':'Disconnected.';
+      }
     });
-    socket.addEventListener('error',()=>errorEl.textContent='Could not connect to the global lobby.');
+    socket.addEventListener('error',()=>{
+      if(!hasJoined)errorEl.textContent='Could not connect to the global lobby.';
+    });
   }
 
-  playButton.addEventListener('click',connect);
+  playButton.addEventListener('click',()=>connect(false));
+  
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible' && hasJoined && !manualDisconnect){
+      if(!socket || socket.readyState===WebSocket.CLOSED){
+        clearReconnectTimer();
+        reconnectAttempts=0;
+        connect(true);
+      }
+    }
+  });
+
   canvas.addEventListener('pointermove',e=>{input.x=e.clientX;input.y=e.clientY;input.active=true;});
   canvas.addEventListener('pointerdown',e=>{input.x=e.clientX;input.y=e.clientY;input.active=true;input.boost=true;});
   canvas.addEventListener('pointerup',()=>input.boost=false);
@@ -300,15 +410,22 @@
       alive:true
     }));
 
-    requestAnimationFrame(loop);
+    loopToken+=1;
+    requestAnimationFrame(now=>loop(now,loopToken));
   }
 
   function returnToMainMenu(){
+    manualDisconnect=true;
+    hasJoined=false;
+    clearReconnectTimer();
+    reconnectAttempts=0;
+    loopToken+=1;
     running=false;
     deathSent=false;
     input.active=false;
     input.boost=false;
     deathScreen.classList.add('hidden');
+    reconnectScreen.classList.add('hidden');
     menu.classList.remove('hidden');
     statusEl.textContent='Offline';
 
@@ -328,6 +445,12 @@
 
   respawnButton.addEventListener('click',respawn);
   mainMenuButton.addEventListener('click',returnToMainMenu);
+  reconnectNowButton.addEventListener('click',()=>{
+    clearReconnectTimer();
+    reconnectAttempts=0;
+    connect(true);
+  });
+  reconnectMenuButton.addEventListener('click',returnToMainMenu);
 
   function checkCollisions(){
     if(!player?.alive)return;
@@ -472,11 +595,13 @@
     if(player)drawSnake(player);
     drawMinimap();
   }
-  function loop(now){
-    if(!running)return;
+  function loop(now,token){
+    if(!running || token!==loopToken)return;
     const dt=Math.min(.04,(now-last)/1000);last=now;
     update(dt,now);render(now);
-    if(running)requestAnimationFrame(loop);
+    if(running && token===loopToken){
+      requestAnimationFrame(nextNow=>loop(nextNow,token));
+    }
   }
   render(performance.now());
 })();

@@ -22,3 +22,13 @@ Collision reports are detected by clients and accepted by the lobby server. For 
 - Bots avoid larger nearby snakes and arena walls.
 - Bots aim ahead of targets and try to cut across their path.
 - Remote-vs-remote collision checks allow bots to kill other bots.
+
+
+## v0.4.0
+- Unexpected WebSocket disconnects now trigger automatic reconnection.
+- Reconnect attempts use exponential backoff with jitter.
+- The game pauses while reconnecting instead of continuing invisibly.
+- A reconnect screen shows connection status and offers manual retry.
+- Returning to the main menu deliberately closes the connection and disables auto-reconnect.
+- Returning to a suspended browser tab triggers an immediate reconnect check.
+- The main menu now displays the game version in the bottom-left corner.
