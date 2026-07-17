@@ -398,7 +398,7 @@
                 const gained=Math.max(0,serverLength-player.length);
 
                 player.length=serverLength;
-                player.radius=clamp(Number(entity.radius)||player.radius,10,27);
+                player.radius=clamp(Number(entity.radius)||player.radius,13,44);
 
                 if(gained>0){
                   score+=Math.round(gained*20);
@@ -415,7 +415,7 @@
             remotes.set(entity.id,snake);
           }
           snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
-          snake.radius=clamp(entity.radius,10.5,29);snake.alive=entity.alive!==false;
+          snake.radius=clamp(entity.radius,13,44);snake.alive=entity.alive!==false;
           snake.netX=clamp(Number(entity.x)||WORLD/2,35,WORLD-35);
           snake.netY=clamp(Number(entity.y)||WORLD/2,35,WORLD-35);
           snake.netAngle=Number(entity.angle)||0;
@@ -865,9 +865,9 @@
     if(player.y<110)player.target=Math.PI/2;if(player.y>WORLD-110)player.target=-Math.PI/2;
     if(boosting)player.length-=dt*1.4;
     player.radius=clamp(
-      7.5+Math.sqrt(Math.max(15,player.length))*.75,
-      10.5,
-      29
+      9+Math.sqrt(Math.max(15,player.length))*1.15,
+      13,
+      44
     );
     updateSegments(player);
 
@@ -915,9 +915,9 @@
     camera.y+=(player.y-camera.y)*Math.min(1,dt*6);
     camera.zoom+=(
       clamp(
-        1.04-Math.sqrt(Math.max(24,player.length))/48,
-        .48,
-        1
+        1.35-Math.sqrt(Math.max(24,player.length))/60,
+        .72,
+        1.35
       )-camera.zoom
     )*Math.min(1,dt*3);
 

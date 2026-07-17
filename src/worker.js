@@ -43,12 +43,12 @@ export class GlobalLobby extends DurableObject {
   }
 
   radiusForLength(length) {
-    // Visible size progression:
-    // ~11 at length 24, ~15 at 100, ~20 at 300, ~27 at 700.
+    // Faster, more visible size progression:
+    // ~15 at length 24, ~21 at 100, ~29 at 300, ~40 at 700.
     return clamp(
-      7.5 + Math.sqrt(Math.max(15, length)) * 0.75,
-      10.5,
-      29
+      9 + Math.sqrt(Math.max(15, length)) * 1.15,
+      13,
+      44
     );
   }
 
