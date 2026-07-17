@@ -553,6 +553,30 @@
     }));
   }
 
+  function reportBotKill(bot){
+    // Bots have no browser to report their own death, so the player whose body
+    // they ran into reports it. The server only accepts this for bots, never
+    // for other humans, so player-vs-player anti-cheat is preserved.
+    if(
+      !bot ||
+      bot.kind!=='bot' ||
+      bot.reportedDead ||
+      !socket ||
+      socket.readyState!==WebSocket.OPEN
+    ){
+      return;
+    }
+
+    bot.reportedDead=true;
+    bot.alive=false;
+
+    socket.send(JSON.stringify({
+      type:'kill',
+      id:bot.id,
+      body:sampleBody(bot)
+    }));
+  }
+
   function dieLocally(){
     if(!player)return;
 
@@ -789,13 +813,17 @@
       // unfair deaths, so ignore this snake's body briefly.
       if(bodyOwner.snapUntil && now<bodyOwner.snapUntil)continue;
 
+      const isBot=bodyOwner.kind==='bot';
+
       // Head-to-head resolution: when two heads meet, the clearly bigger
       // snake wins and the smaller one dies. Each client runs this rule on
       // itself, so charging a smaller snake head-on now kills THEM, not you.
       const headDistance=Math.hypot(bodyOwner.x-player.x,bodyOwner.y-player.y);
       if(headDistance<=player.radius+bodyOwner.radius){
         if(player.length>bodyOwner.length+6){
-          // We are clearly bigger: survive and let their client kill them.
+          // We are clearly bigger: survive. A losing bot can't report its own
+          // death, so we report it for them; a human's own client handles it.
+          if(isBot)reportBotKill(bodyOwner);
           continue;
         }
         // Smaller or roughly equal size: we lose the head-on.
@@ -803,9 +831,16 @@
         return;
       }
 
+      // Our head ran into their body: we die.
       if(headHitsBody(player,bodyOwner)){
         reportCollision(player);
         return;
+      }
+
+      // A bot's head ran into OUR body: the bot dies. We can only do this for
+      // bots, since a human snake reports its own death from its own client.
+      if(isBot && headHitsBody(bodyOwner,player)){
+        reportBotKill(bodyOwner);
       }
     }
   }

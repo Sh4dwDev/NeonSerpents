@@ -224,90 +224,104 @@ export class GlobalLobby extends DurableObject {
         continue;
       }
 
-      const others = [
-        ...humans.map(player => ({ ...player, isHuman: true })),
-        ...bots
-          .filter(other => other.id !== bot.id)
-          .map(other => ({ ...other, isHuman: false }))
-      ];
+      // Only re-decide on a fixed cadence. Running the AI on every incoming
+      // network message made bots re-pick a heading dozens of times per second,
+      // which is what caused the constant jitter. Between decisions the bot just
+      // keeps steering toward its current target, so motion stays smooth.
+      if (!bot.nextThink) bot.nextThink = 0;
+      const shouldThink = now >= bot.nextThink;
 
-      let nearestThreat = null;
-      let threatDistance = Infinity;
-      let bestTarget = null;
-      let targetScore = -Infinity;
-      let nearestFood = null;
-      let nearestFoodScore = Infinity;
-      let separationX = 0;
-      let separationY = 0;
-      let separationStrength = 0;
+      if (shouldThink) {
+        bot.nextThink = now + 120 + Math.random() * 70;
 
-      for (let i = 0; i < this.foods.length; i += 3) {
-        const food = this.foods[i];
-        const distance = Math.hypot(food.x - bot.x, food.y - bot.y);
-        const score = distance - (food.kind === "super" ? 280 : 0);
+        const others = [
+          ...humans.map(player => ({ ...player, isHuman: true })),
+          ...bots
+            .filter(other => other.id !== bot.id)
+            .map(other => ({ ...other, isHuman: false }))
+        ];
 
-        if (distance < 1050 && score < nearestFoodScore) {
-          nearestFoodScore = score;
-          nearestFood = food;
-        }
-      }
+        let nearestThreat = null;
+        let threatDistance = Infinity;
+        let bestTarget = null;
+        let targetScore = -Infinity;
+        let nearestFood = null;
+        let nearestFoodScore = Infinity;
+        let separationX = 0;
+        let separationY = 0;
+        let separationStrength = 0;
 
-      for (const other of others) {
-        const dx = other.x - bot.x;
-        const dy = other.y - bot.y;
-        const distance = Math.hypot(dx, dy) || 0.001;
-        const sizeRatio = (other.length || START_LENGTH) / Math.max(bot.length, START_LENGTH);
+        for (let i = 0; i < this.foods.length; i += 3) {
+          const food = this.foods[i];
+          const distance = Math.hypot(food.x - bot.x, food.y - bot.y);
+          const score = distance - (food.kind === "super" ? 280 : 0);
 
-        const separationRadius = other.isHuman ? 130 : 240;
-        if (distance < separationRadius) {
-          const strength = (separationRadius - distance) / separationRadius;
-          separationX -= dx / distance * strength;
-          separationY -= dy / distance * strength;
-          separationStrength += strength;
-        }
-
-        if ((sizeRatio > 1.12 && distance < 430) || distance < 92) {
-          if (distance < threatDistance) {
-            threatDistance = distance;
-            nearestThreat = other;
+          if (distance < 1050 && score < nearestFoodScore) {
+            nearestFoodScore = score;
+            nearestFood = food;
           }
         }
 
-        if (sizeRatio < 0.9 && distance < 700) {
-          const humanBonus = other.isHuman ? 180 : 0;
-          const score = 850 - distance + humanBonus + (1 - sizeRatio) * 220;
+        for (const other of others) {
+          const dx = other.x - bot.x;
+          const dy = other.y - bot.y;
+          const distance = Math.hypot(dx, dy) || 0.001;
+          const sizeRatio = (other.length || START_LENGTH) / Math.max(bot.length, START_LENGTH);
 
-          if (score > targetScore) {
-            targetScore = score;
-            bestTarget = other;
+          const separationRadius = other.isHuman ? 130 : 240;
+          if (distance < separationRadius) {
+            const strength = (separationRadius - distance) / separationRadius;
+            separationX -= dx / distance * strength;
+            separationY -= dy / distance * strength;
+            separationStrength += strength;
+          }
+
+          if ((sizeRatio > 1.12 && distance < 430) || distance < 92) {
+            if (distance < threatDistance) {
+              threatDistance = distance;
+              nearestThreat = other;
+            }
+          }
+
+          if (sizeRatio < 0.9 && distance < 700) {
+            const humanBonus = other.isHuman ? 180 : 0;
+            const score = 850 - distance + humanBonus + (1 - sizeRatio) * 220;
+
+            if (score > targetScore) {
+              targetScore = score;
+              bestTarget = other;
+            }
           }
         }
-      }
 
-      if (separationStrength > 0.08) {
-        bot.targetAngle = Math.atan2(separationY, separationX);
-        bot.speed = 128;
-      } else if (nearestThreat) {
-        // Imperfect escape angle so bots are easier to trap and juke.
-        bot.targetAngle = Math.atan2(
-          bot.y - nearestThreat.y,
-          bot.x - nearestThreat.x
-        ) + (Math.random() - 0.5) * 0.9;
-        bot.speed = 118;
-      } else if (bestTarget && Math.random() < 0.62) {
-        const lead = 70;
-        const tx = bestTarget.x + Math.cos(bestTarget.angle || 0) * lead;
-        const ty = bestTarget.y + Math.sin(bestTarget.angle || 0) * lead;
-        bot.targetAngle = Math.atan2(ty - bot.y, tx - bot.x);
-        bot.speed = 120;
-      } else if (nearestFood) {
-        bot.targetAngle = Math.atan2(
-          nearestFood.y - bot.y,
-          nearestFood.x - bot.x
-        );
-        bot.speed = 110;
-      } else if (Math.random() < dt * 0.8) {
-        bot.targetAngle += (Math.random() - 0.5) * 1.2;
+        if (separationStrength > 0.08) {
+          bot.targetAngle = Math.atan2(separationY, separationX);
+          bot.speed = 128;
+        } else if (nearestThreat) {
+          // Imperfect escape angle so bots are easier to trap and juke.
+          bot.targetAngle = Math.atan2(
+            bot.y - nearestThreat.y,
+            bot.x - nearestThreat.x
+          ) + (Math.random() - 0.5) * 0.9;
+          bot.speed = 118;
+        } else if (bestTarget && Math.random() < 0.62) {
+          const lead = 70;
+          const tx = bestTarget.x + Math.cos(bestTarget.angle || 0) * lead;
+          const ty = bestTarget.y + Math.sin(bestTarget.angle || 0) * lead;
+          bot.targetAngle = Math.atan2(ty - bot.y, tx - bot.x);
+          bot.speed = 120;
+        } else if (nearestFood) {
+          bot.targetAngle = Math.atan2(
+            nearestFood.y - bot.y,
+            nearestFood.x - bot.x
+          );
+          bot.speed = 110;
+        } else if (Math.random() < 0.25) {
+          bot.targetAngle += (Math.random() - 0.5) * 1.2;
+        }
+
+        // Lower turn rates make bots slower to react, so their jukes are worse.
+        bot.turnSpeed = separationStrength > 0.08 ? 2.6 : 1.8;
       }
 
       const wallMargin = 300;
@@ -321,8 +335,7 @@ export class GlobalLobby extends DurableObject {
         Math.cos(bot.targetAngle - bot.angle)
       );
 
-      // Lower turn rates make bots slower to react, so their jukes are worse.
-      const turnSpeed = separationStrength > 0.08 ? 2.6 : 1.8;
+      const turnSpeed = bot.turnSpeed || 1.8;
       bot.angle += clamp(delta, -turnSpeed * dt, turnSpeed * dt);
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
@@ -607,6 +620,16 @@ export class GlobalLobby extends DurableObject {
       // A client may only report its own death. This prevents two clients
       // from killing each other from conflicting collision reports.
       this.killEntity(senderId, data.body);
+    }
+
+    if (data.type === "kill") {
+      // Bots cannot report their own deaths, so the player they collided with
+      // reports it for them. Only bots may be killed this way — a human death
+      // must still be self-reported, so player-vs-player stays uncheatable.
+      const targetId = String(data.id || "");
+      if (targetId.startsWith("bot-") && this.bots.has(targetId)) {
+        this.killEntity(targetId, data.body);
+      }
     }
 
     this.updateBots();
