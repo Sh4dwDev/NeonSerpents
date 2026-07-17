@@ -808,6 +808,15 @@
     for(const bodyOwner of remotes.values()){
       if(!bodyOwner.alive)continue;
 
+      // Never die to a bot we've already reported killed; an in-flight snapshot
+      // can briefly flag it alive again before the server confirms its death.
+      if(bodyOwner.reportedDead)continue;
+
+      // Only collide with snakes we are actually drawing. A stale snake (lag,
+      // disconnect, frozen snapshot stream) stops being rendered but its old
+      // reconstructed body used to linger and cause "invisible" deaths.
+      if(bodyOwner.lastNetworkUpdate && now-bodyOwner.lastNetworkUpdate>=5000)continue;
+
       // Right after a network snap the remote body is rebuilt as a straight
       // line and does not reflect the real snake. Checking it caused random,
       // unfair deaths, so ignore this snake's body briefly.
