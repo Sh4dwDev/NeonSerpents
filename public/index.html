@@ -50,12 +50,12 @@
   <div id="leaderRows"></div>
 </aside>
 
-<div class="version-label">Neon Serpents v0.9.0</div>
+<div class="version-label">Neon Serpents v1.0.0</div>
 
 <div class="overlay" id="menu">
   <div class="card">
     <h1>Neon Serpents</h1>
-    <p>One global 16-slot lobby. Bots slowly fill empty slots.</p>
+    <p>One global lobby with up to 16 humans and a maximum of 6 bots.</p>
     <label for="name">Player name</label>
     <input id="name" maxlength="16" value="Player" />
     <button id="play" type="button">Join global lobby</button>
@@ -101,7 +101,7 @@
   const reconnectNowButton=document.querySelector('#reconnectNow');
   const reconnectMenuButton=document.querySelector('#reconnectMenu');
 
-  const WORLD=6200, BASE_FOOD=760;
+  const WORLD=6200;
   const input={x:0,y:0,active:false,boost:false};
   const camera={x:WORLD/2,y:WORLD/2,zoom:1};
   const remotes=new Map();
@@ -315,9 +315,6 @@
       menu.classList.add('hidden');
       reconnectScreen.classList.add('hidden');
 
-      if(!foods.length){
-        foods=Array.from({length:BASE_FOOD},()=>makeFood());
-      }
 
       hasJoined=true;
       running=true;
@@ -362,9 +359,21 @@
       if(data.type==='snapshot'){
         slotsEl.textContent=data.humans;
         updateLeaderboard(data.entities);
+        if(Array.isArray(data.foods)){
+          foods=data.foods.map(food=>({
+            ...food,
+            r:food.kind==='super'?8.5:clamp(3+(food.value||1)*.35,3,8),
+            phase:Math.random()*7
+          }));
+        }
         const seen=new Set();
 
         for(const entity of data.entities){
+          if(entity.alive===false){
+            remotes.delete(entity.id);
+            if(entity.id===playerId && player?.alive)dieLocally();
+            continue;
+          }
           if(entity.id===playerId){
             if(player && entity.alive===false && player.alive){
               player.alive=false;dieLocally();
@@ -379,7 +388,7 @@
             remotes.set(entity.id,snake);
           }
           snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
-          snake.radius=clamp(entity.radius,8,22);snake.alive=entity.alive!==false;
+          snake.radius=clamp(entity.radius,10,27);snake.alive=entity.alive!==false;
           snake.netX=clamp(Number(entity.x)||WORLD/2,35,WORLD-35);
           snake.netY=clamp(Number(entity.y)||WORLD/2,35,WORLD-35);
           snake.netAngle=Number(entity.angle)||0;
@@ -409,8 +418,7 @@
 
       if(data.type==='death'){
         spawnDeathOrbs(data);
-        const snake=remotes.get(data.id);
-        if(snake)snake.alive=false;
+        remotes.delete(data.id);
         if(data.id===playerId){
           dieLocally();
         }
@@ -632,23 +640,24 @@
 
     const snakes=[player,...remotes.values()].filter(s=>s.alive);
 
-    // Every head can collide with every other snake's body.
-    // A snake never collides with its own body.
     for(const victim of snakes){
       for(const bodyOwner of snakes){
         if(victim===bodyOwner || !victim.alive || !bodyOwner.alive)continue;
 
-        const startIndex=bodyOwner===player ? 8 : 6;
+        // Skip the head and neck area. Head-to-head contact does not count
+        // as running into somebody's body.
+        const startIndex=Math.max(
+          10,
+          Math.ceil((victim.radius+bodyOwner.radius)*1.5)
+        );
+
         for(let i=startIndex;i<bodyOwner.segments.length;i+=2){
           const segment=bodyOwner.segments[i];
-          const hitRadius=victim.radius+bodyOwner.radius*.55;
+          const hitRadius=victim.radius+bodyOwner.radius*.5;
 
           if((segment.x-victim.x)**2+(segment.y-victim.y)**2<hitRadius**2){
             reportCollision(victim);
-
-            if(victim===player){
-              return;
-            }
+            if(victim===player)return;
             break;
           }
         }
@@ -673,6 +682,7 @@
     if(player.x<110)player.target=0;if(player.x>WORLD-110)player.target=Math.PI;
     if(player.y<110)player.target=Math.PI/2;if(player.y>WORLD-110)player.target=-Math.PI/2;
     if(boosting)player.length-=dt*1.4;
+    player.radius=clamp(8.5+Math.sqrt(Math.max(15,player.length))*.34,10,27);
     updateSegments(player);
 
     for(const snake of remotes.values()){
@@ -705,34 +715,14 @@
       updateSegments(snake);
     }
 
-    for(let i=foods.length-1;i>=0;i--){
-      const f=foods[i];
-      if((f.x-player.x)**2+(f.y-player.y)**2<(player.radius+10)**2){
-        foods.splice(i,1);
-
-        const growth=f.kind==='super'
-          ? 3.4
-          : f.value*.5;
-
-        player.length+=growth;
-        score+=f.kind==='super'
-          ? 100
-          : Math.round(10*f.value);
-
-        if(f.kind==='super'){
-          player.radius=Math.min(24,player.radius+.18);
-        }
-
-        if(foods.length<BASE_FOOD)foods.push(makeFood());
-      }
-    }
+    // Food eating and growth are server-authoritative.
 
     // Self-collision remains intentionally disabled.
     checkCollisions();
 
     camera.x+=(player.x-camera.x)*Math.min(1,dt*6);
     camera.y+=(player.y-camera.y)*Math.min(1,dt*6);
-    camera.zoom+=(clamp(.98-player.length/520,.62,1)-camera.zoom)*Math.min(1,dt*3);
+    camera.zoom+=(clamp(1.02-player.length/650,.55,1)-camera.zoom)*Math.min(1,dt*3);
 
     scoreEl.textContent=score;lengthEl.textContent=Math.floor(player.length);
 

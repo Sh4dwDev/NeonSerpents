@@ -83,3 +83,16 @@ Collision reports are detected by clients and accepted by the lobby server. For 
 - Bot speed and hunting range were reduced for fairer play.
 - Bot separation was increased to prevent crowding.
 - Human and respawn positions are spread more widely.
+
+
+## v1.0.0 playtest fixes
+- Human capacity remains 16, but bots are capped at 6.
+- Bots cannot spawn within 1100 world units of any living player.
+- Bot respawns wait six seconds and may be delayed until a safe location exists.
+- Food is now server-controlled and shared by all clients.
+- Bots seek normal food and super orbs, eat them, grow longer, and become thicker.
+- Players also become thicker as they grow.
+- Collision radius, eyes, rendering, and camera zoom scale with snake thickness.
+- Dead remote bodies are removed immediately.
+- Head-to-head overlap no longer counts as a body collision.
+- Only contact with a snake's body beyond its neck causes death.
