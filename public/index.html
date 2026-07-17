@@ -50,7 +50,7 @@
   <div id="leaderRows"></div>
 </aside>
 
-<div class="version-label">Neon Serpents v0.4.0</div>
+<div class="version-label">Neon Serpents v0.8.0</div>
 
 <div class="overlay" id="menu">
   <div class="card">
@@ -60,7 +60,7 @@
     <input id="name" maxlength="16" value="Player" />
     <button id="play" type="button">Join global lobby</button>
     <p id="error" class="small"></p>
-    <p class="small">Cross your own body safely. Anyone who hits another snake's body dies and drops their mass as orbs.</p>
+    <p class="small">Cross your own body safely. Anyone who hits another snake's body dies and drops their mass as orbs. Rare golden super orbs give a larger boost.</p>
   </div>
 </div>
 
@@ -129,17 +129,115 @@
     return s;
   }
 
-  function makeFood(x=random(50,WORLD-50),y=random(50,WORLD-50),value=1,hue=random(0,360)){
-    return {x,y,value,r:clamp(3+value*.35,3,8),hue,phase:random(0,7)};
+  function makeFood(
+    x=random(50,WORLD-50),
+    y=random(50,WORLD-50),
+    value=1,
+    hue=random(0,360),
+    kind='auto'
+  ){
+    const isSuper=kind==='super' || (
+      kind==='auto' &&
+      value===1 &&
+      Math.random()<0.035
+    );
+
+    if(isSuper){
+      return {
+        x,
+        y,
+        value:5,
+        r:8.5,
+        hue:46,
+        phase:random(0,7),
+        kind:'super'
+      };
+    }
+
+    return {
+      x,
+      y,
+      value,
+      r:clamp(3+value*.35,3,8),
+      hue,
+      phase:random(0,7),
+      kind
+    };
   }
 
   function spawnDeathOrbs(data){
-    const orbCount=clamp(Math.round(data.length*.7),16,260);
+    const body=Array.isArray(data.body) && data.body.length
+      ? data.body
+          .filter(point=>Number.isFinite(point?.x) && Number.isFinite(point?.y))
+          .map(point=>({
+            x:clamp(point.x,0,WORLD),
+            y:clamp(point.y,0,WORLD)
+          }))
+      : [{x:data.x,y:data.y}];
+
+    const orbCount=clamp(Math.round(data.length*.72),16,300);
     const value=Math.max(1,data.length/orbCount);
+
+    // Measure the full body path so orbs spread evenly along its shape.
+    const cumulative=[0];
+    let totalDistance=0;
+
+    for(let i=1;i<body.length;i++){
+      totalDistance+=Math.hypot(
+        body[i].x-body[i-1].x,
+        body[i].y-body[i-1].y
+      );
+      cumulative.push(totalDistance);
+    }
+
     for(let i=0;i<orbCount;i++){
-      const angle=random(0,Math.PI*2);
-      const distance=Math.sqrt(Math.random())*Math.min(150,30+data.length*.7);
-      foods.push(makeFood(data.x+Math.cos(angle)*distance,data.y+Math.sin(angle)*distance,value,data.hue));
+      let baseX=data.x;
+      let baseY=data.y;
+
+      if(body.length===1 || totalDistance<1){
+        baseX=body[0].x;
+        baseY=body[0].y;
+      }else{
+        // Add a little randomness while still covering the whole body.
+        const progress=clamp((i+random(-.32,.32))/Math.max(1,orbCount-1),0,1);
+        const wantedDistance=progress*totalDistance;
+
+        let segmentIndex=1;
+        while(
+          segmentIndex<cumulative.length-1 &&
+          cumulative[segmentIndex]<wantedDistance
+        ){
+          segmentIndex++;
+        }
+
+        const previousDistance=cumulative[segmentIndex-1];
+        const segmentDistance=Math.max(
+          .001,
+          cumulative[segmentIndex]-previousDistance
+        );
+        const amount=clamp(
+          (wantedDistance-previousDistance)/segmentDistance,
+          0,
+          1
+        );
+
+        const start=body[segmentIndex-1];
+        const end=body[segmentIndex];
+        baseX=start.x+(end.x-start.x)*amount;
+        baseY=start.y+(end.y-start.y)*amount;
+      }
+
+      // Small local scatter keeps the trail organic without losing its shape.
+      const scatterAngle=random(0,Math.PI*2);
+      const scatterDistance=random(0,Math.min(13,3+value*1.3));
+
+      foods.push(makeFood(
+        clamp(baseX+Math.cos(scatterAngle)*scatterDistance,0,WORLD),
+        clamp(baseY+Math.sin(scatterAngle)*scatterDistance,0,WORLD),
+        value,
+        data.hue,
+        'death'
+      ));
     }
   }
 
@@ -282,7 +380,29 @@
           }
           snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
           snake.radius=entity.radius;snake.alive=entity.alive!==false;
-          snake.netX=entity.x;snake.netY=entity.y;snake.netAngle=entity.angle;
+          snake.netX=clamp(Number(entity.x)||WORLD/2,35,WORLD-35);
+          snake.netY=clamp(Number(entity.y)||WORLD/2,35,WORLD-35);
+          snake.netAngle=Number(entity.angle)||0;
+          snake.lastNetworkUpdate=performance.now();
+
+          if(
+            !Number.isFinite(snake.x) ||
+            !Number.isFinite(snake.y) ||
+            snake.x<0 ||
+            snake.y<0 ||
+            snake.x>WORLD ||
+            snake.y>WORLD
+          ){
+            snake.x=snake.netX;
+            snake.y=snake.netY;
+            snake.segments.length=0;
+            for(let i=0;i<Math.max(15,Math.floor(snake.length));i++){
+              snake.segments.push({
+                x:snake.x-Math.cos(snake.netAngle)*i*8,
+                y:snake.y-Math.sin(snake.netAngle)*i*8
+              });
+            }
+          }
         }
         for(const id of remotes.keys())if(!seen.has(id))remotes.delete(id);
       }
@@ -337,9 +457,45 @@
   addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();input.boost=true;}});
   addEventListener('keyup',e=>{if(e.code==='Space')input.boost=false;});
 
+  function sampleBody(snake){
+    if(!snake?.segments?.length)return [{x:snake.x,y:snake.y}];
+
+    // Keep enough points to preserve curves while limiting network size.
+    const maxPoints=140;
+    const step=Math.max(1,Math.ceil(snake.segments.length/maxPoints));
+    const points=[];
+
+    for(let i=0;i<snake.segments.length;i+=step){
+      const segment=snake.segments[i];
+      points.push({
+        x:Math.round(segment.x*10)/10,
+        y:Math.round(segment.y*10)/10
+      });
+    }
+
+    const tail=snake.segments.at(-1);
+    const last=points.at(-1);
+    if(tail && (!last || last.x!==tail.x || last.y!==tail.y)){
+      points.push({
+        x:Math.round(tail.x*10)/10,
+        y:Math.round(tail.y*10)/10
+      });
+    }
+
+    return points;
+  }
+
   function reportCollision(victim){
     if(!socket||socket.readyState!==WebSocket.OPEN||!victim.alive)return;
-    socket.send(JSON.stringify({type:'collision',victimId:victim.id,x:victim.x,y:victim.y}));
+
+    socket.send(JSON.stringify({
+      type:'collision',
+      victimId:victim.id,
+      x:victim.x,
+      y:victim.y,
+      body:sampleBody(victim)
+    }));
+
     victim.alive=false;
   }
 
@@ -501,18 +657,53 @@
     updateSegments(player);
 
     for(const snake of remotes.values()){
-      snake.x+=(snake.netX-snake.x)*Math.min(1,dt*10);
-      snake.y+=(snake.netY-snake.y)*Math.min(1,dt*10);
-      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*10);
+      const dx=snake.netX-snake.x;
+      const dy=snake.netY-snake.y;
+      const distance=Math.hypot(dx,dy);
+
+      // A large jump means a respawn, reconnect, or corrected server state.
+      // Snap instead of visually dragging the snake across the arena.
+      if(distance>420){
+        snake.x=snake.netX;
+        snake.y=snake.netY;
+
+        for(let i=0;i<snake.segments.length;i++){
+          snake.segments[i].x=snake.x-Math.cos(snake.netAngle)*i*8;
+          snake.segments[i].y=snake.y-Math.sin(snake.netAngle)*i*8;
+        }
+      }else{
+        // Smooth ordinary network movement, but cap visual catch-up speed.
+        const maxCatchup=Math.max(180,Math.min(520,distance*7))*dt;
+        const movement=Math.min(distance,maxCatchup);
+
+        if(distance>.001){
+          snake.x+=dx/distance*movement;
+          snake.y+=dy/distance*movement;
+        }
+      }
+
+      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*11);
       updateSegments(snake);
     }
 
     for(let i=foods.length-1;i>=0;i--){
       const f=foods[i];
-      if((f.x-player.x)**2+(f.y-player.y)**2<(player.radius+8)**2){
+      if((f.x-player.x)**2+(f.y-player.y)**2<(player.radius+10)**2){
         foods.splice(i,1);
-        player.length+=f.value*.5;
-        score+=Math.round(10*f.value);
+
+        const growth=f.kind==='super'
+          ? 3.4
+          : f.value*.5;
+
+        player.length+=growth;
+        score+=f.kind==='super'
+          ? 100
+          : Math.round(10*f.value);
+
+        if(f.kind==='super'){
+          player.radius=Math.min(24,player.radius+.18);
+        }
+
         if(foods.length<BASE_FOOD)foods.push(makeFood());
       }
     }
@@ -546,10 +737,58 @@
   }
   function drawFood(time){
     for(const f of foods){
-      const p=worldToScreen(f.x,f.y);if(p.x<-20||p.y<-20||p.x>W+20||p.y>H+20)continue;
+      const p=worldToScreen(f.x,f.y);
+      if(p.x<-30||p.y<-30||p.x>W+30||p.y>H+30)continue;
+
+      if(f.kind==='super'){
+        const pulse=1+Math.sin(time*.006+f.phase)*.22;
+        const r=f.r*camera.zoom*pulse;
+
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,r*2.8,0,Math.PI*2);
+        ctx.fillStyle='rgba(255,205,55,.12)';
+        ctx.fill();
+
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,r*1.65,0,Math.PI*2);
+        ctx.strokeStyle='rgba(255,224,105,.55)';
+        ctx.lineWidth=Math.max(1.2,2*camera.zoom);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(p.x,p.y,r,0,Math.PI*2);
+        const gradient=ctx.createRadialGradient(
+          p.x-r*.25,p.y-r*.3,r*.15,
+          p.x,p.y,r
+        );
+        gradient.addColorStop(0,'#fff7c2');
+        gradient.addColorStop(.45,'#ffd84d');
+        gradient.addColorStop(1,'#e89900');
+        ctx.fillStyle=gradient;
+        ctx.fill();
+
+        // Small sparkle cross.
+        ctx.beginPath();
+        ctx.moveTo(p.x-r*.55,p.y);
+        ctx.lineTo(p.x+r*.55,p.y);
+        ctx.moveTo(p.x,p.y-r*.55);
+        ctx.lineTo(p.x,p.y+r*.55);
+        ctx.strokeStyle='rgba(255,255,235,.78)';
+        ctx.lineWidth=Math.max(1,1.3*camera.zoom);
+        ctx.stroke();
+        continue;
+      }
+
       const r=f.r*camera.zoom*(1+Math.sin(time*.004+f.phase)*.18);
-      ctx.beginPath();ctx.arc(p.x,p.y,r*2.3,0,7);ctx.fillStyle=`hsla(${f.hue},95%,62%,.12)`;ctx.fill();
-      ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);ctx.fillStyle=`hsl(${f.hue},95%,68%)`;ctx.fill();
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,r*2.3,0,Math.PI*2);
+      ctx.fillStyle=`hsla(${f.hue},95%,62%,.12)`;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,r,0,Math.PI*2);
+      ctx.fillStyle=`hsl(${f.hue},95%,68%)`;
+      ctx.fill();
     }
   }
   function drawLabel(s,head,r){
@@ -561,7 +800,16 @@
   function drawSnake(s){
     if(!s.alive)return;const radius=s.radius*camera.zoom;
     for(let i=s.segments.length-1;i>=0;i--){
-      const p=worldToScreen(s.segments[i].x,s.segments[i].y);
+      const segment=s.segments[i];
+      if(
+        !Number.isFinite(segment.x) ||
+        !Number.isFinite(segment.y) ||
+        segment.x<-60 ||
+        segment.y<-60 ||
+        segment.x>WORLD+60 ||
+        segment.y>WORLD+60
+      )continue;
+      const p=worldToScreen(segment.x,segment.y);
       if(p.x<-45||p.y<-45||p.x>W+45||p.y>H+45)continue;
       const r=radius*clamp((s.segments.length-i)/9,.45,1);
       ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);
@@ -591,7 +839,11 @@
   }
   function render(time){
     ctx.setTransform(dpr,0,0,dpr,0,0);drawBackground();drawFood(time);
-    for(const s of remotes.values())drawSnake(s);
+    for(const s of remotes.values()){
+      if(!s.lastNetworkUpdate || performance.now()-s.lastNetworkUpdate<5000){
+        drawSnake(s);
+      }
+    }
     if(player)drawSnake(player);
     drawMinimap();
   }

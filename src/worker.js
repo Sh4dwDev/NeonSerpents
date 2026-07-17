@@ -37,28 +37,54 @@ export class GlobalLobby extends DurableObject {
   }
 
   makeBot(index) {
+    const generation = crypto.randomUUID().slice(0, 8);
+
+    // Spread the 32 logical slots around the arena rather than spawning
+    // everybody near the same random target.
+    const columns = 6;
+    const rows = 6;
+    const column = index % columns;
+    const row = Math.floor(index / columns) % rows;
+    const cellWidth = (WORLD - 700) / columns;
+    const cellHeight = (WORLD - 700) / rows;
+
+    const x = 350 + column * cellWidth + Math.random() * cellWidth * 0.65;
+    const y = 350 + row * cellHeight + Math.random() * cellHeight * 0.65;
+
     return {
-      id: `bot-${index}`,
+      id: `bot-${index}-${generation}`,
+      slot: index,
       name: `${BOT_NAMES[index % BOT_NAMES.length]} (bot)`,
-      x: 250 + Math.random() * (WORLD - 500),
-      y: 250 + Math.random() * (WORLD - 500),
+      x,
+      y,
       angle: Math.random() * Math.PI * 2,
       targetAngle: Math.random() * Math.PI * 2,
       hue: (index * 47 + 25) % 360,
       length: START_LENGTH + Math.random() * 28,
       radius: 10,
-      speed: 90 + Math.random() * 45,
-      alive: true
+      speed: 95 + Math.random() * 38,
+      alive: true,
+      stuckTime: 0,
+      lastX: x,
+      lastY: y
     };
   }
 
   ensureBots() {
     const needed = Math.max(0, MAX_SLOTS - this.players.size);
+
     while (this.bots.size < needed) {
+      const occupiedSlots = new Set(
+        [...this.bots.values()].map(bot => Number(bot.slot))
+      );
+
       let index = 0;
-      while (this.bots.has(`bot-${index}`)) index++;
-      this.bots.set(`bot-${index}`, this.makeBot(index));
+      while (occupiedSlots.has(index)) index++;
+
+      const bot = this.makeBot(index);
+      this.bots.set(bot.id, bot);
     }
+
     while (this.bots.size > needed) {
       const key = [...this.bots.keys()].at(-1);
       this.bots.delete(key);
@@ -71,12 +97,29 @@ export class GlobalLobby extends DurableObject {
     this.lastBotUpdate = now;
 
     const humans = [...this.players.values()].filter(player => player.alive !== false);
-    const allBots = [...this.bots.values()].filter(bot => bot.alive !== false);
+    const bots = [...this.bots.values()].filter(bot => bot.alive !== false);
 
-    for (const bot of allBots) {
+    for (const bot of bots) {
+      // Recover immediately from invalid or out-of-world state.
+      if (
+        !Number.isFinite(bot.x) ||
+        !Number.isFinite(bot.y) ||
+        bot.x < 0 ||
+        bot.y < 0 ||
+        bot.x > WORLD ||
+        bot.y > WORLD
+      ) {
+        const replacement = this.makeBot(Number(bot.slot) || 0);
+        this.bots.delete(bot.id);
+        this.bots.set(replacement.id, replacement);
+        continue;
+      }
+
       const others = [
         ...humans.map(player => ({ ...player, isHuman: true })),
-        ...allBots.filter(other => other.id !== bot.id).map(other => ({ ...other, isHuman: false }))
+        ...bots
+          .filter(other => other.id !== bot.id)
+          .map(other => ({ ...other, isHuman: false }))
       ];
 
       let nearestThreat = null;
@@ -84,21 +127,38 @@ export class GlobalLobby extends DurableObject {
       let bestTarget = null;
       let targetScore = -Infinity;
 
+      let separationX = 0;
+      let separationY = 0;
+      let separationStrength = 0;
+      let dangerouslyStacked = false;
+
       for (const other of others) {
         const dx = other.x - bot.x;
         const dy = other.y - bot.y;
-        const distance = Math.hypot(dx, dy) || 1;
+        const distance = Math.hypot(dx, dy) || 0.001;
         const sizeRatio = (other.length || START_LENGTH) / Math.max(bot.length, START_LENGTH);
 
-        // Larger or very close snakes are dangerous.
-        if ((sizeRatio > 1.12 && distance < 520) || distance < 105) {
+        // Strong local repulsion prevents rainbow stacking.
+        // Bots separate more strongly from other bots than from prey.
+        const separationRadius = other.isHuman ? 80 : 145;
+        if (distance < separationRadius) {
+          const strength = (separationRadius - distance) / separationRadius;
+          separationX -= dx / distance * strength;
+          separationY -= dy / distance * strength;
+          separationStrength += strength;
+
+          if (!other.isHuman && distance < 24) {
+            dangerouslyStacked = true;
+          }
+        }
+
+        if ((sizeRatio > 1.12 && distance < 520) || distance < 100) {
           if (distance < threatDistance) {
             threatDistance = distance;
             nearestThreat = other;
           }
         }
 
-        // Prefer nearby smaller humans, then smaller bots.
         if (sizeRatio < 0.96 && distance < 900) {
           const humanBonus = other.isHuman ? 260 : 0;
           const sizeBonus = (1 - sizeRatio) * 300;
@@ -111,22 +171,36 @@ export class GlobalLobby extends DurableObject {
         }
       }
 
-      if (nearestThreat) {
-        // Steer away from the threat with a slight sideways turn,
-        // making the escape less predictable.
+      if (separationStrength > 0.05) {
+        const separationAngle = Math.atan2(separationY, separationX);
+
+        // At very close range, separation overrides hunting completely.
+        if (separationStrength > 0.55 || dangerouslyStacked) {
+          bot.targetAngle = separationAngle;
+          bot.speed = 165;
+        } else {
+          // Otherwise blend separation into the current intended path.
+          const intendedX = Math.cos(bot.targetAngle);
+          const intendedY = Math.sin(bot.targetAngle);
+          bot.targetAngle = Math.atan2(
+            intendedY + separationY * 1.8,
+            intendedX + separationX * 1.8
+          );
+        }
+      } else if (nearestThreat) {
         const away = Math.atan2(bot.y - nearestThreat.y, bot.x - nearestThreat.x);
         const sidestep = Math.sin(now / 480 + bot.hue) * 0.55;
         bot.targetAngle = away + sidestep;
         bot.speed = 150;
       } else if (bestTarget) {
-        // Aim ahead of the target instead of directly at its current head.
-        const leadDistance = Math.min(150, 45 + bestTarget.speed * 0.5);
+        const leadDistance = Math.min(150, 45 + (bestTarget.speed || 120) * 0.5);
         const targetX = bestTarget.x + Math.cos(bestTarget.angle || 0) * leadDistance;
         const targetY = bestTarget.y + Math.sin(bestTarget.angle || 0) * leadDistance;
 
-        // Offset slightly to encourage cutting across the target's path.
-        const side = Math.sin(now / 700 + bot.hue) > 0 ? 1 : -1;
-        const flank = 55;
+        // Different slots choose different flank directions so they do not
+        // all attack along one identical line.
+        const side = (Number(bot.slot) || 0) % 2 === 0 ? 1 : -1;
+        const flank = 55 + ((Number(bot.slot) || 0) % 4) * 14;
         const sideX = -Math.sin(bestTarget.angle || 0) * flank * side;
         const sideY = Math.cos(bestTarget.angle || 0) * flank * side;
 
@@ -134,7 +208,7 @@ export class GlobalLobby extends DurableObject {
           targetY + sideY - bot.y,
           targetX + sideX - bot.x
         );
-        bot.speed = 145;
+        bot.speed = 142 + ((Number(bot.slot) || 0) % 5) * 3;
       } else {
         if (Math.random() < dt * 0.9) {
           bot.targetAngle += (Math.random() - 0.5) * 1.3;
@@ -142,8 +216,7 @@ export class GlobalLobby extends DurableObject {
         bot.speed += (112 + Math.random() * 18 - bot.speed) * Math.min(1, dt * 2);
       }
 
-      // Strong wall avoidance.
-      const wallMargin = 220;
+      const wallMargin = 250;
       if (bot.x < wallMargin) bot.targetAngle = 0;
       if (bot.x > WORLD - wallMargin) bot.targetAngle = Math.PI;
       if (bot.y < wallMargin) bot.targetAngle = Math.PI / 2;
@@ -154,13 +227,39 @@ export class GlobalLobby extends DurableObject {
         Math.cos(bot.targetAngle - bot.angle)
       );
 
-      const turnSpeed = nearestThreat ? 3.4 : bestTarget ? 2.8 : 2.1;
+      const turnSpeed = dangerouslyStacked
+        ? 5.5
+        : separationStrength > 0.05
+          ? 4.2
+          : nearestThreat
+            ? 3.4
+            : bestTarget
+              ? 2.8
+              : 2.1;
+
       bot.angle += clamp(delta, -turnSpeed * dt, turnSpeed * dt);
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
 
-      bot.x = clamp(bot.x, 30, WORLD - 30);
-      bot.y = clamp(bot.y, 30, WORLD - 30);
+      bot.x = clamp(bot.x, 35, WORLD - 35);
+      bot.y = clamp(bot.y, 35, WORLD - 35);
+
+      // Detect bots that barely move because they are trapped inside a stack.
+      const moved = Math.hypot(bot.x - bot.lastX, bot.y - bot.lastY);
+      if (moved < 1.2 && dangerouslyStacked) {
+        bot.stuckTime = (bot.stuckTime || 0) + dt;
+      } else {
+        bot.stuckTime = Math.max(0, (bot.stuckTime || 0) - dt * 2);
+      }
+
+      bot.lastX = bot.x;
+      bot.lastY = bot.y;
+
+      if (bot.stuckTime > 1.2) {
+        const replacement = this.makeBot(Number(bot.slot) || 0);
+        this.bots.delete(bot.id);
+        this.bots.set(replacement.id, replacement);
+      }
     }
   }
 
@@ -187,7 +286,7 @@ export class GlobalLobby extends DurableObject {
     }
   }
 
-  killEntity(victimId, x, y) {
+  killEntity(victimId, x, y, body = []) {
     let victim = this.players.get(victimId);
     let isBot = false;
 
@@ -200,21 +299,37 @@ export class GlobalLobby extends DurableObject {
     victim.alive = false;
     const droppedLength = clamp(Number(victim.length) || START_LENGTH, START_LENGTH, 500);
 
+    const safeBody = Array.isArray(body)
+      ? body
+          .slice(0, 160)
+          .filter(point =>
+            Number.isFinite(Number(point?.x)) &&
+            Number.isFinite(Number(point?.y))
+          )
+          .map(point => ({
+            x: clamp(Number(point.x), 0, WORLD),
+            y: clamp(Number(point.y), 0, WORLD)
+          }))
+      : [];
+
     this.broadcast({
       type: "death",
       id: victimId,
       x: clamp(Number(x) || victim.x, 0, WORLD),
       y: clamp(Number(y) || victim.y, 0, WORLD),
       length: droppedLength,
-      hue: victim.hue
+      hue: victim.hue,
+      body: safeBody
     });
 
     if (isBot) {
-      const botIndex = Number(victimId.split("-")[1]) || 0;
+      const botIndex = Number(victim.slot) || 0;
       this.bots.delete(victimId);
+
       setTimeout(() => {
         if (this.bots.size < Math.max(0, MAX_SLOTS - this.players.size)) {
-          this.bots.set(victimId, this.makeBot(botIndex));
+          const replacement = this.makeBot(botIndex);
+          this.bots.set(replacement.id, replacement);
           this.broadcast(this.roster());
         }
       }, 1400);
@@ -286,7 +401,7 @@ export class GlobalLobby extends DurableObject {
     }
 
     if (data.type === "collision" && typeof data.victimId === "string") {
-      this.killEntity(data.victimId, data.x, data.y);
+      this.killEntity(data.victimId, data.x, data.y, data.body);
     }
 
     this.updateBots();
