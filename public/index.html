@@ -438,6 +438,8 @@
                 y:snake.y-Math.sin(snake.netAngle)*i*8
               });
             }
+            // Freshly rebuilt straight body: don't count it for collisions yet.
+            snake.snapUntil=performance.now()+300;
           }
         }
         for(const id of remotes.keys())if(!seen.has(id))remotes.delete(id);
@@ -737,11 +739,13 @@
 
     // Skip only the actual head/neck. Never skip the whole body.
     const neckSegments=Math.min(
-      6,
-      Math.max(3,Math.floor(bodyOwner.segments.length*.1))
+      8,
+      Math.max(4,Math.floor(bodyOwner.segments.length*.12))
     );
 
-    const hitRadius=victim.radius+bodyOwner.radius*.52;
+    // Require genuine overlap rather than a graze, so passing close alongside
+    // another snake no longer counts as a fatal collision.
+    const hitRadius=victim.radius*.85+bodyOwner.radius*.4;
     const hitRadiusSquared=hitRadius*hitRadius;
 
     for(let i=neckSegments;i<bodyOwner.segments.length-1;i++){
@@ -775,8 +779,29 @@
   function checkCollisions(){
     if(!player?.alive)return;
 
+    const now=performance.now();
+
     for(const bodyOwner of remotes.values()){
       if(!bodyOwner.alive)continue;
+
+      // Right after a network snap the remote body is rebuilt as a straight
+      // line and does not reflect the real snake. Checking it caused random,
+      // unfair deaths, so ignore this snake's body briefly.
+      if(bodyOwner.snapUntil && now<bodyOwner.snapUntil)continue;
+
+      // Head-to-head resolution: when two heads meet, the clearly bigger
+      // snake wins and the smaller one dies. Each client runs this rule on
+      // itself, so charging a smaller snake head-on now kills THEM, not you.
+      const headDistance=Math.hypot(bodyOwner.x-player.x,bodyOwner.y-player.y);
+      if(headDistance<=player.radius+bodyOwner.radius){
+        if(player.length>bodyOwner.length+6){
+          // We are clearly bigger: survive and let their client kill them.
+          continue;
+        }
+        // Smaller or roughly equal size: we lose the head-on.
+        reportCollision(player);
+        return;
+      }
 
       if(headHitsBody(player,bodyOwner)){
         reportCollision(player);
@@ -828,6 +853,9 @@
           snake.segments[i].x=snake.x-Math.cos(snake.netAngle)*i*8;
           snake.segments[i].y=snake.y-Math.sin(snake.netAngle)*i*8;
         }
+
+        // Body was just rebuilt straight; don't kill anyone against it yet.
+        snake.snapUntil=performance.now()+300;
       }else{
         // Smooth ordinary network movement, but cap visual catch-up speed.
         const maxCatchup=Math.max(180,Math.min(520,distance*7))*dt;

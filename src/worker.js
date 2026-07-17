@@ -266,7 +266,7 @@ export class GlobalLobby extends DurableObject {
           separationStrength += strength;
         }
 
-        if ((sizeRatio > 1.12 && distance < 560) || distance < 105) {
+        if ((sizeRatio > 1.12 && distance < 430) || distance < 92) {
           if (distance < threatDistance) {
             threatDistance = distance;
             nearestThreat = other;
@@ -288,11 +288,12 @@ export class GlobalLobby extends DurableObject {
         bot.targetAngle = Math.atan2(separationY, separationX);
         bot.speed = 128;
       } else if (nearestThreat) {
+        // Imperfect escape angle so bots are easier to trap and juke.
         bot.targetAngle = Math.atan2(
           bot.y - nearestThreat.y,
           bot.x - nearestThreat.x
-        );
-        bot.speed = 126;
+        ) + (Math.random() - 0.5) * 0.9;
+        bot.speed = 118;
       } else if (bestTarget && Math.random() < 0.62) {
         const lead = 70;
         const tx = bestTarget.x + Math.cos(bestTarget.angle || 0) * lead;
@@ -320,7 +321,8 @@ export class GlobalLobby extends DurableObject {
         Math.cos(bot.targetAngle - bot.angle)
       );
 
-      const turnSpeed = separationStrength > 0.08 ? 4 : 2.5;
+      // Lower turn rates make bots slower to react, so their jukes are worse.
+      const turnSpeed = separationStrength > 0.08 ? 2.6 : 1.8;
       bot.angle += clamp(delta, -turnSpeed * dt, turnSpeed * dt);
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
