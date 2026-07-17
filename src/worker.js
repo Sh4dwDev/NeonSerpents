@@ -70,24 +70,94 @@ export class GlobalLobby extends DurableObject {
     const dt = Math.min(0.1, Math.max(0, (now - this.lastBotUpdate) / 1000));
     this.lastBotUpdate = now;
 
-    for (const bot of this.bots.values()) {
-      if (Math.random() < dt * 0.8) {
-        bot.targetAngle += (Math.random() - 0.5) * 1.5;
+    const humans = [...this.players.values()].filter(player => player.alive !== false);
+    const allBots = [...this.bots.values()].filter(bot => bot.alive !== false);
+
+    for (const bot of allBots) {
+      const others = [
+        ...humans.map(player => ({ ...player, isHuman: true })),
+        ...allBots.filter(other => other.id !== bot.id).map(other => ({ ...other, isHuman: false }))
+      ];
+
+      let nearestThreat = null;
+      let threatDistance = Infinity;
+      let bestTarget = null;
+      let targetScore = -Infinity;
+
+      for (const other of others) {
+        const dx = other.x - bot.x;
+        const dy = other.y - bot.y;
+        const distance = Math.hypot(dx, dy) || 1;
+        const sizeRatio = (other.length || START_LENGTH) / Math.max(bot.length, START_LENGTH);
+
+        // Larger or very close snakes are dangerous.
+        if ((sizeRatio > 1.12 && distance < 520) || distance < 105) {
+          if (distance < threatDistance) {
+            threatDistance = distance;
+            nearestThreat = other;
+          }
+        }
+
+        // Prefer nearby smaller humans, then smaller bots.
+        if (sizeRatio < 0.96 && distance < 900) {
+          const humanBonus = other.isHuman ? 260 : 0;
+          const sizeBonus = (1 - sizeRatio) * 300;
+          const score = 1100 - distance + humanBonus + sizeBonus;
+
+          if (score > targetScore) {
+            targetScore = score;
+            bestTarget = other;
+          }
+        }
       }
+
+      if (nearestThreat) {
+        // Steer away from the threat with a slight sideways turn,
+        // making the escape less predictable.
+        const away = Math.atan2(bot.y - nearestThreat.y, bot.x - nearestThreat.x);
+        const sidestep = Math.sin(now / 480 + bot.hue) * 0.55;
+        bot.targetAngle = away + sidestep;
+        bot.speed = 150;
+      } else if (bestTarget) {
+        // Aim ahead of the target instead of directly at its current head.
+        const leadDistance = Math.min(150, 45 + bestTarget.speed * 0.5);
+        const targetX = bestTarget.x + Math.cos(bestTarget.angle || 0) * leadDistance;
+        const targetY = bestTarget.y + Math.sin(bestTarget.angle || 0) * leadDistance;
+
+        // Offset slightly to encourage cutting across the target's path.
+        const side = Math.sin(now / 700 + bot.hue) > 0 ? 1 : -1;
+        const flank = 55;
+        const sideX = -Math.sin(bestTarget.angle || 0) * flank * side;
+        const sideY = Math.cos(bestTarget.angle || 0) * flank * side;
+
+        bot.targetAngle = Math.atan2(
+          targetY + sideY - bot.y,
+          targetX + sideX - bot.x
+        );
+        bot.speed = 145;
+      } else {
+        if (Math.random() < dt * 0.9) {
+          bot.targetAngle += (Math.random() - 0.5) * 1.3;
+        }
+        bot.speed += (112 + Math.random() * 18 - bot.speed) * Math.min(1, dt * 2);
+      }
+
+      // Strong wall avoidance.
+      const wallMargin = 220;
+      if (bot.x < wallMargin) bot.targetAngle = 0;
+      if (bot.x > WORLD - wallMargin) bot.targetAngle = Math.PI;
+      if (bot.y < wallMargin) bot.targetAngle = Math.PI / 2;
+      if (bot.y > WORLD - wallMargin) bot.targetAngle = -Math.PI / 2;
 
       const delta = Math.atan2(
         Math.sin(bot.targetAngle - bot.angle),
         Math.cos(bot.targetAngle - bot.angle)
       );
 
-      bot.angle += clamp(delta, -2.2 * dt, 2.2 * dt);
+      const turnSpeed = nearestThreat ? 3.4 : bestTarget ? 2.8 : 2.1;
+      bot.angle += clamp(delta, -turnSpeed * dt, turnSpeed * dt);
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
-
-      if (bot.x < 120) bot.targetAngle = 0;
-      if (bot.x > WORLD - 120) bot.targetAngle = Math.PI;
-      if (bot.y < 120) bot.targetAngle = Math.PI / 2;
-      if (bot.y > WORLD - 120) bot.targetAngle = -Math.PI / 2;
 
       bot.x = clamp(bot.x, 30, WORLD - 30);
       bot.y = clamp(bot.y, 30, WORLD - 30);

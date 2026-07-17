@@ -25,6 +25,7 @@
     label { display:block; margin:14px 0 6px; color:#c8d3e3; font-size:13px; }
     input { width:100%; padding:11px 12px; border:1px solid #ffffff20; border-radius:12px; background:#ffffff0b; color:white; font-size:16px; outline:none; }
     button { width:100%; margin-top:14px; padding:12px 14px; border:0; border-radius:12px; background:#2bd4f3; color:#031017; font-weight:800; cursor:pointer; }
+    .secondary-button { background:#ffffff10; color:#eef5ff; border:1px solid #ffffff1c; }
     .small { font-size:12px; } .hidden { display:none!important; } #error { color:#ff9eae; min-height:18px; }
     @media(max-width:650px){ .leaderboard{width:170px;top:50px}.leader-row{font-size:11px}.optional{display:none}.pill{font-size:12px;padding:6px 8px} }
   </style>
@@ -60,6 +61,16 @@
   </div>
 </div>
 
+
+<div class="overlay hidden" id="deathScreen">
+  <div class="card">
+    <h1>You died</h1>
+    <p id="deathMessage">Your snake turned into glowing orbs.</p>
+    <button id="respawn" type="button">Respawn</button>
+    <button id="mainMenu" type="button" class="secondary-button">Main menu</button>
+  </div>
+</div>
+
 <script>
 (() => {
   const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d');
@@ -68,6 +79,10 @@
   const statusEl=document.querySelector('#status'),slotsEl=document.querySelector('#slots');
   const scoreEl=document.querySelector('#score'),lengthEl=document.querySelector('#length');
   const leaderRows=document.querySelector('#leaderRows');
+  const deathScreen=document.querySelector('#deathScreen');
+  const deathMessage=document.querySelector('#deathMessage');
+  const respawnButton=document.querySelector('#respawn');
+  const mainMenuButton=document.querySelector('#mainMenu');
 
   const WORLD=4200, BASE_FOOD=520;
   const input={x:0,y:0,active:false,boost:false};
@@ -134,6 +149,7 @@
 
   function connect(){
     errorEl.textContent='';deathSent=false;
+    deathScreen.classList.add('hidden');
     const protocol=location.protocol==='https:'?'wss:':'ws:';
     socket=new WebSocket(`${protocol}//${location.host}/ws`);
     statusEl.textContent='Connecting…';
@@ -194,7 +210,10 @@
     });
 
     socket.addEventListener('close',event=>{
-      running=false;statusEl.textContent='Disconnected';menu.classList.remove('hidden');
+      running=false;
+      statusEl.textContent='Disconnected';
+      if(!deathScreen.classList.contains('hidden')) return;
+      menu.classList.remove('hidden');
       errorEl.textContent=event.code===1006?'Connection lost. Press Join to reconnect.':'Disconnected.';
     });
     socket.addEventListener('error',()=>errorEl.textContent='Could not connect to the global lobby.');
@@ -216,34 +235,124 @@
 
   function dieLocally(){
     if(deathSent)return;
-    deathSent=true;running=false;statusEl.textContent='You crashed';
-    setTimeout(()=>location.reload(),1500);
+    deathSent=true;
+    running=false;
+    input.boost=false;
+    input.active=false;
+    statusEl.textContent='You died';
+    deathMessage.textContent=`You reached length ${Math.floor(player?.length || 24)}. Your mass was dropped as orbs.`;
+    deathScreen.classList.remove('hidden');
+    render(performance.now());
   }
+
+  function resetPlayerForRespawn(){
+    const spawnX=WORLD/2+random(-500,500);
+    const spawnY=WORLD/2+random(-500,500);
+    const name=(nameInput.value.trim()||'Player').slice(0,16);
+
+    player=makeSnake({
+      id:playerId,
+      name,
+      x:spawnX,
+      y:spawnY,
+      angle:random(0,Math.PI*2),
+      hue:random(175,220),
+      length:24,
+      radius:10,
+      alive:true
+    },'player');
+
+    score=0;
+    scoreEl.textContent='0';
+    lengthEl.textContent='24';
+    camera.x=player.x;
+    camera.y=player.y;
+    camera.zoom=1;
+    deathSent=false;
+    input.active=false;
+    input.boost=false;
+  }
+
+  function respawn(){
+    if(!socket || socket.readyState!==WebSocket.OPEN){
+      deathScreen.classList.add('hidden');
+      menu.classList.remove('hidden');
+      errorEl.textContent='Connection was lost. Join the lobby again.';
+      return;
+    }
+
+    resetPlayerForRespawn();
+    deathScreen.classList.add('hidden');
+    statusEl.textContent='Online';
+    running=true;
+    last=performance.now();
+    lastSend=0;
+
+    socket.send(JSON.stringify({
+      type:'state',
+      name:player.name,
+      x:player.x,
+      y:player.y,
+      angle:player.angle,
+      hue:player.hue,
+      length:player.length,
+      radius:player.radius,
+      alive:true
+    }));
+
+    requestAnimationFrame(loop);
+  }
+
+  function returnToMainMenu(){
+    running=false;
+    deathSent=false;
+    input.active=false;
+    input.boost=false;
+    deathScreen.classList.add('hidden');
+    menu.classList.remove('hidden');
+    statusEl.textContent='Offline';
+
+    if(socket){
+      try{ socket.close(1000,'Returned to menu'); }catch{}
+      socket=null;
+    }
+
+    player=null;
+    playerId=null;
+    remotes.clear();
+    score=0;
+    scoreEl.textContent='0';
+    lengthEl.textContent='24';
+    render(performance.now());
+  }
+
+  respawnButton.addEventListener('click',respawn);
+  mainMenuButton.addEventListener('click',returnToMainMenu);
 
   function checkCollisions(){
     if(!player?.alive)return;
 
-    // Your head into somebody else's body => you die.
-    for(const snake of remotes.values()){
-      if(!snake.alive)continue;
-      for(let i=5;i<snake.segments.length;i+=2){
-        const p=snake.segments[i];
-        if((p.x-player.x)**2+(p.y-player.y)**2<(player.radius+snake.radius*.55)**2){
-          reportCollision(player);
-          return;
-        }
-      }
-    }
+    const snakes=[player,...remotes.values()].filter(s=>s.alive);
 
-    // Somebody else's head into your body => they die.
-    // Start deeper into your body so touching your head is not mistaken for body collision.
-    for(const snake of remotes.values()){
-      if(!snake.alive)continue;
-      for(let i=8;i<player.segments.length;i+=2){
-        const p=player.segments[i];
-        if((p.x-snake.x)**2+(p.y-snake.y)**2<(snake.radius+player.radius*.55)**2){
-          reportCollision(snake);
-          break;
+    // Every head can collide with every other snake's body.
+    // A snake never collides with its own body.
+    for(const victim of snakes){
+      for(const bodyOwner of snakes){
+        if(victim===bodyOwner || !victim.alive || !bodyOwner.alive)continue;
+
+        const startIndex=bodyOwner===player ? 8 : 6;
+        for(let i=startIndex;i<bodyOwner.segments.length;i+=2){
+          const segment=bodyOwner.segments[i];
+          const hitRadius=victim.radius+bodyOwner.radius*.55;
+
+          if((segment.x-victim.x)**2+(segment.y-victim.y)**2<hitRadius**2){
+            reportCollision(victim);
+
+            if(victim===player){
+              return;
+            }
+            break;
+          }
         }
       }
     }

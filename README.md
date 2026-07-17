@@ -11,3 +11,14 @@ Upload/replace these files in the existing GitHub repository, then let the conne
 
 Important prototype limitation:
 Collision reports are detected by clients and accepted by the lobby server. For a competitive game, collision validation should later move fully to the Durable Object.
+
+
+## v3 updates
+- Fixed invisible continued movement after death.
+- Added a death screen with Respawn and Main menu buttons.
+- Respawning keeps the existing global-lobby connection.
+- Bots now hunt smaller players and bots.
+- Bots prioritize human targets when practical.
+- Bots avoid larger nearby snakes and arena walls.
+- Bots aim ahead of targets and try to cut across their path.
+- Remote-vs-remote collision checks allow bots to kill other bots.
