@@ -36,7 +36,9 @@ export class GlobalLobby extends DurableObject {
     this.foods = [];
     this.lastBotUpdate = Date.now();
     this.lastBroadcast = 0;
+    this.lastFoodBroadcast = 0;
     this.lastBotFill = 0;
+    this.lastBotCollisionCheck = 0;
 
     this.ensureFood();
     this.ensureBots(true);
@@ -146,7 +148,12 @@ export class GlobalLobby extends DurableObject {
       alive: true,
       stuckTime: 0,
       lastX: spawn.x,
-      lastY: spawn.y
+      lastY: spawn.y,
+      prevX: spawn.x,
+      prevY: spawn.y,
+      // Server-side body trail so bots can collide with each other. Bots have
+      // no browser to report their own death, so the server must detect it.
+      trail: [{ x: spawn.x, y: spawn.y }]
     };
   }
 
@@ -337,32 +344,158 @@ export class GlobalLobby extends DurableObject {
 
       const turnSpeed = bot.turnSpeed || 1.8;
       bot.angle += clamp(delta, -turnSpeed * dt, turnSpeed * dt);
+      bot.prevX = bot.x;
+      bot.prevY = bot.y;
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
       bot.x = clamp(bot.x, 35, WORLD - 35);
       bot.y = clamp(bot.y, 35, WORLD - 35);
 
+      this.updateBotTrail(bot);
       this.eatFood(bot);
     }
 
+    this.detectBotCollisions(now);
+
     this.ensureFood();
+    // Refill bots reliably here (self-throttled) rather than depending only on
+    // the delayed timer in killEntity, which can be lost if the DO hibernates.
+    this.ensureBots(false);
+  }
+
+  updateBotTrail(bot) {
+    if (!bot.trail || bot.trail.length === 0) {
+      bot.trail = [{ x: bot.x, y: bot.y }];
+    }
+
+    bot.trail[0].x = bot.x;
+    bot.trail[0].y = bot.y;
+
+    const spacing = Math.max(7, bot.radius * 0.9);
+    for (let i = 1; i < bot.trail.length; i++) {
+      const a = bot.trail[i - 1];
+      const b = bot.trail[i];
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const d = Math.hypot(dx, dy) || 1;
+      b.x = a.x - dx / d * spacing;
+      b.y = a.y - dy / d * spacing;
+    }
+
+    // Cap the tracked body so long bots stay cheap to simulate.
+    const wanted = Math.min(160, Math.max(15, Math.floor(bot.length)));
+    while (bot.trail.length < wanted) {
+      const tail = bot.trail[bot.trail.length - 1];
+      bot.trail.push({ x: tail.x, y: tail.y });
+    }
+    while (bot.trail.length > wanted) {
+      bot.trail.pop();
+    }
+  }
+
+  detectBotCollisions(now) {
+    // Bots have no browser to report their own death, so the server resolves
+    // bot-vs-bot collisions here. Throttled so a burst of messages can't run
+    // this every few milliseconds.
+    if (now - this.lastBotCollisionCheck < 55) return;
+    this.lastBotCollisionCheck = now;
+
+    const liveBots = [...this.bots.values()].filter(bot => bot.alive !== false);
+    const dead = [];
+
+    for (const bot of liveBots) {
+      if (!Number.isFinite(bot.x) || !Number.isFinite(bot.y)) continue;
+
+      for (const other of liveBots) {
+        if (other === bot || other.alive === false) continue;
+        if (!other.trail || other.trail.length < 7) continue;
+
+        // Skip the other bot's head/neck so touching heads isn't an instant
+        // mutual kill; only running into the body counts.
+        const neck = Math.min(8, Math.max(4, Math.floor(other.trail.length * 0.12)));
+        const hit = bot.radius + other.radius * 0.5;
+        const hitSquared = hit * hit;
+        let killed = false;
+
+        for (let i = neck; i < other.trail.length - 1; i++) {
+          const a = other.trail[i];
+          const b = other.trail[i + 1];
+          if (this.pointSegmentDistanceSquared(bot.x, bot.y, a.x, a.y, b.x, b.y) <= hitSquared) {
+            killed = true;
+            break;
+          }
+        }
+
+        if (killed) {
+          dead.push(bot);
+          break;
+        }
+      }
+    }
+
+    for (const bot of dead) {
+      this.killEntity(bot.id, bot.trail);
+    }
+  }
+
+  pointSegmentDistanceSquared(px, py, ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const lengthSquared = dx * dx + dy * dy;
+
+    if (lengthSquared < 0.0001) {
+      return (px - ax) ** 2 + (py - ay) ** 2;
+    }
+
+    const amount = clamp(
+      ((px - ax) * dx + (py - ay) * dy) / lengthSquared,
+      0,
+      1
+    );
+
+    const nearestX = ax + dx * amount;
+    const nearestY = ay + dy * amount;
+    return (px - nearestX) ** 2 + (py - nearestY) ** 2;
   }
 
   entities() {
+    // Emit only the fields the client needs. In particular this drops each
+    // bot's server-side `trail` (up to 160 points) so it never bloats the
+    // frequent position broadcasts.
+    const shape = e => ({
+      id: e.id,
+      name: e.name,
+      x: e.x,
+      y: e.y,
+      angle: e.angle,
+      hue: e.hue,
+      length: e.length,
+      radius: e.radius,
+      alive: e.alive
+    });
+
     return [
-      ...[...this.players.values()].map(({ socket, ...player }) => player),
-      ...this.bots.values()
+      ...[...this.players.values()].map(shape),
+      ...[...this.bots.values()].map(shape)
     ];
   }
 
-  roster() {
-    return {
+  roster(includeFoods = true) {
+    const snapshot = {
       type: "snapshot",
       maxHumans: MAX_HUMANS,
       humans: this.players.size,
-      entities: this.entities(),
-      foods: this.foods
+      entities: this.entities()
     };
+
+    // The food array is large; only sync it periodically. Entity positions go
+    // out on every broadcast so other players move in near real time without
+    // paying the food bandwidth each frame.
+    if (includeFoods) {
+      snapshot.foods = this.foods;
+    }
+
+    return snapshot;
   }
 
   broadcast(payload) {
@@ -585,59 +718,130 @@ export class GlobalLobby extends DurableObject {
   }
 
   webSocketMessage(socket, rawMessage) {
-    let data;
-
+    // A single bad frame or edge case must never close the connection and
+    // force the player to reconnect, so the whole handler is guarded.
     try {
-      data = JSON.parse(
-        typeof rawMessage === "string"
-          ? rawMessage
-          : new TextDecoder().decode(rawMessage)
-      );
-    } catch {
-      return;
-    }
+      let data;
 
-    const senderId = this.ctx.getTags(socket)[0];
-    const player = this.players.get(senderId);
-
-    if (!player) return;
-
-    if (data.type === "state") {
-      player.name = String(data.name || "Player").slice(0, 16);
-      player.x = clamp(Number(data.x) || WORLD / 2, 0, WORLD);
-      player.y = clamp(Number(data.y) || WORLD / 2, 0, WORLD);
-      player.angle = Number(data.angle) || 0;
-      player.hue = clamp(Number(data.hue) || 190, 0, 360);
-      player.length = clamp(Number(data.length) || START_LENGTH, 15, 700);
-      player.radius = this.radiusForLength(player.length);
-      player.alive = data.alive !== false;
-      player.updatedAt = Date.now();
-
-      this.eatFood(player);
-    }
-
-    if (data.type === "collision") {
-      // A client may only report its own death. This prevents two clients
-      // from killing each other from conflicting collision reports.
-      this.killEntity(senderId, data.body);
-    }
-
-    if (data.type === "kill") {
-      // Bots cannot report their own deaths, so the player they collided with
-      // reports it for them. Only bots may be killed this way — a human death
-      // must still be self-reported, so player-vs-player stays uncheatable.
-      const targetId = String(data.id || "");
-      if (targetId.startsWith("bot-") && this.bots.has(targetId)) {
-        this.killEntity(targetId, data.body);
+      try {
+        data = JSON.parse(
+          typeof rawMessage === "string"
+            ? rawMessage
+            : new TextDecoder().decode(rawMessage)
+        );
+      } catch {
+        return;
       }
-    }
 
-    this.updateBots();
+      const senderId = this.ctx.getTags(socket)[0];
+      if (!senderId) return;
 
-    const now = Date.now();
-    if (now - this.lastBroadcast >= 70) {
-      this.lastBroadcast = now;
-      this.broadcast(this.roster());
+      let player = this.players.get(senderId);
+
+      // If the Durable Object hibernated or was evicted, its in-memory state
+      // is gone but the socket is still attached. Rebuild the player's entry
+      // from their own incoming state so the game heals itself instead of
+      // forcing a reconnect.
+      if (!player && data.type === "state") {
+        player = {
+          socket,
+          id: senderId,
+          name: "Player",
+          x: WORLD / 2,
+          y: WORLD / 2,
+          angle: 0,
+          hue: 190,
+          length: START_LENGTH,
+          radius: this.radiusForLength(START_LENGTH),
+          alive: true,
+          updatedAt: Date.now()
+        };
+        this.players.set(senderId, player);
+        this.ensureBots(false);
+      }
+
+      if (!player) return;
+
+      // Keep the live socket reference current in case it changed after a wake.
+      player.socket = socket;
+
+      if (data.type === "state") {
+        const previousLength = player.length;
+
+        player.name = String(data.name || "Player").slice(0, 16);
+        player.x = clamp(Number(data.x) || WORLD / 2, 0, WORLD);
+        player.y = clamp(Number(data.y) || WORLD / 2, 0, WORLD);
+        player.angle = Number(data.angle) || 0;
+        player.hue = clamp(Number(data.hue) || 190, 0, 360);
+        player.length = clamp(Number(data.length) || START_LENGTH, 15, 700);
+        player.radius = this.radiusForLength(player.length);
+        player.alive = data.alive !== false;
+        player.updatedAt = Date.now();
+
+        // Boosting burns length. Shed that mass as orbs behind the snake — one
+        // orb per unit of length lost, like slither.io. Small drops only, so a
+        // respawn or correction never dumps a giant pile.
+        const lost = previousLength - player.length;
+        if (player.alive && lost > 0 && lost < 8) {
+          player.boostDrop = (player.boostDrop || 0) + lost;
+
+          let guard = 0;
+          while (player.boostDrop >= 1 && guard < 12) {
+            player.boostDrop -= 1;
+            guard++;
+
+            // Place the orb well behind the head so the snake can't instantly
+            // eat its own dropped mass.
+            const back = player.radius + 24;
+            const dropX = player.x - Math.cos(player.angle) * back + (Math.random() - 0.5) * 12;
+            const dropY = player.y - Math.sin(player.angle) * back + (Math.random() - 0.5) * 12;
+
+            this.foods.push(this.makeFood(
+              clamp(dropX, 0, WORLD),
+              clamp(dropY, 0, WORLD),
+              1,
+              player.hue,
+              "boost"
+            ));
+          }
+        }
+
+        this.eatFood(player);
+      }
+
+      if (data.type === "collision") {
+        // A client may only report its own death. This prevents two clients
+        // from killing each other from conflicting collision reports.
+        this.killEntity(senderId, data.body);
+      }
+
+      if (data.type === "kill") {
+        // Bots cannot report their own deaths, so the player they collided with
+        // reports it for them. Only bots may be killed this way — a human death
+        // must still be self-reported, so player-vs-player stays uncheatable.
+        const targetId = String(data.id || "");
+        if (targetId.startsWith("bot-") && this.bots.has(targetId)) {
+          this.killEntity(targetId, data.body);
+        }
+      }
+
+      this.updateBots();
+
+      const now = Date.now();
+      if (now - this.lastBroadcast >= 50) {
+        this.lastBroadcast = now;
+
+        // Sync the heavy food array only a few times a second; positions every
+        // broadcast. This keeps other players near real time while cutting the
+        // bandwidth that was causing lag spikes and dropped connections.
+        const includeFoods = now - this.lastFoodBroadcast >= 200;
+        if (includeFoods) this.lastFoodBroadcast = now;
+
+        this.broadcast(this.roster(includeFoods));
+      }
+    } catch {
+      // Swallow unexpected errors; dropping one frame is fine, dropping the
+      // whole connection is not.
     }
   }
 

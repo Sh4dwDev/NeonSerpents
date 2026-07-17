@@ -395,14 +395,22 @@
                 dieLocally();
               }else if(entity.alive!==false){
                 const serverLength=clamp(Number(entity.length)||player.length,15,700);
-                const gained=Math.max(0,serverLength-player.length);
 
-                player.length=serverLength;
-                player.radius=clamp(Number(entity.radius)||player.radius,13,44);
-
-                if(gained>0){
-                  score+=Math.round(gained*20);
+                // Accept growth and small corrections, but never a large
+                // server-side drop. That only happens right after a reconnect,
+                // when the server hands us a fresh length-24 snake — we must
+                // keep our real length instead of losing it.
+                if(serverLength>=player.length-6){
+                  const gained=Math.max(0,serverLength-player.length);
+                  player.length=serverLength;
+                  if(gained>0)score+=Math.round(gained*20);
                 }
+
+                player.radius=clamp(
+                  9+Math.sqrt(Math.max(15,player.length))*1.15,
+                  13,
+                  44
+                );
               }
             }
             continue;
@@ -901,8 +909,10 @@
         // Body was just rebuilt straight; don't kill anyone against it yet.
         snake.snapUntil=performance.now()+300;
       }else{
-        // Smooth ordinary network movement, but cap visual catch-up speed.
-        const maxCatchup=Math.max(180,Math.min(520,distance*7))*dt;
+        // Converge on the network position quickly so other players appear
+        // close to real time, but scale the speed with the gap so small
+        // corrections stay smooth instead of stuttering.
+        const maxCatchup=Math.max(420,Math.min(1500,distance*13))*dt;
         const movement=Math.min(distance,maxCatchup);
 
         if(distance>.001){
@@ -911,7 +921,7 @@
         }
       }
 
-      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*11);
+      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*18);
       updateSegments(snake);
     }
 
@@ -932,7 +942,7 @@
 
     scoreEl.textContent=score;lengthEl.textContent=Math.floor(player.length);
 
-    if(socket?.readyState===WebSocket.OPEN&&now-lastSend>50){
+    if(socket?.readyState===WebSocket.OPEN&&now-lastSend>40){
       lastSend=now;
       socket.send(JSON.stringify({
         type:'state',name:player.name,x:player.x,y:player.y,angle:player.angle,
