@@ -68,3 +68,18 @@ Collision reports are detected by clients and accepted by the lobby server. For 
 - Super orbs award 100 score and about 3.4 length.
 - Super orbs use a larger pulsing golden design with a sparkle.
 - Death-orb trails remain normal mass drops and never randomly convert into super orbs.
+
+
+## v0.9.0 playtest build
+- Lobby reduced from 32 to 16 total entities.
+- World size increased from 4200 to 6200.
+- Base food count increased to suit the larger world.
+- Local death now freezes instantly before the server responds.
+- Movement, boosting, and animation stop immediately on death.
+- Bot spawns are distributed across a 4x4 arena grid.
+- Bot spawn points reject nearby crowded positions.
+- Bot refill is rate-limited instead of happening instantly.
+- Dead bots wait about five seconds before returning.
+- Bot speed and hunting range were reduced for fairer play.
+- Bot separation was increased to prevent crowding.
+- Human and respawn positions are spread more widely.

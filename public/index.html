@@ -40,7 +40,7 @@
     <div class="pill">Length <b id="length">24</b></div>
   </div>
   <div class="group">
-    <div class="pill"><b id="slots">0</b>/32 humans</div>
+    <div class="pill"><b id="slots">0</b>/16 humans</div>
     <div class="pill optional" id="status">Connecting…</div>
   </div>
 </div>
@@ -50,12 +50,12 @@
   <div id="leaderRows"></div>
 </aside>
 
-<div class="version-label">Neon Serpents v0.8.0</div>
+<div class="version-label">Neon Serpents v0.9.0</div>
 
 <div class="overlay" id="menu">
   <div class="card">
     <h1>Neon Serpents</h1>
-    <p>One global 32-slot lobby. Bots automatically fill empty slots.</p>
+    <p>One global 16-slot lobby. Bots slowly fill empty slots.</p>
     <label for="name">Player name</label>
     <input id="name" maxlength="16" value="Player" />
     <button id="play" type="button">Join global lobby</button>
@@ -101,7 +101,7 @@
   const reconnectNowButton=document.querySelector('#reconnectNow');
   const reconnectMenuButton=document.querySelector('#reconnectMenu');
 
-  const WORLD=4200, BASE_FOOD=520;
+  const WORLD=6200, BASE_FOOD=760;
   const input={x:0,y:0,active:false,boost:false};
   const camera={x:WORLD/2,y:WORLD/2,zoom:1};
   const remotes=new Map();
@@ -340,7 +340,7 @@
         }else{
           player=makeSnake({
             id:playerId,name:(nameInput.value.trim()||'Player').slice(0,16),
-            x:WORLD/2+random(-250,250),y:WORLD/2+random(-250,250),
+            x:WORLD/2+random(-900,900),y:WORLD/2+random(-900,900),
             angle:random(0,Math.PI*2),hue:random(175,220),length:24,radius:10
           },'player');
           camera.x=player.x;camera.y=player.y;
@@ -379,7 +379,7 @@
             remotes.set(entity.id,snake);
           }
           snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
-          snake.radius=entity.radius;snake.alive=entity.alive!==false;
+          snake.radius=clamp(entity.radius,8,22);snake.alive=entity.alive!==false;
           snake.netX=clamp(Number(entity.x)||WORLD/2,35,WORLD-35);
           snake.netY=clamp(Number(entity.y)||WORLD/2,35,WORLD-35);
           snake.netAngle=Number(entity.angle)||0;
@@ -411,8 +411,8 @@
         spawnDeathOrbs(data);
         const snake=remotes.get(data.id);
         if(snake)snake.alive=false;
-        if(data.id===playerId && player?.alive){
-          player.alive=false;dieLocally();
+        if(data.id===playerId){
+          dieLocally();
         }
       }
     });
@@ -488,32 +488,51 @@
   function reportCollision(victim){
     if(!socket||socket.readyState!==WebSocket.OPEN||!victim.alive)return;
 
+    const body=sampleBody(victim);
+    victim.alive=false;
+
+    // The local player stops immediately instead of waiting for the server.
+    if(victim===player){
+      player.speed=0;
+      input.active=false;
+      input.boost=false;
+      running=false;
+      loopToken+=1;
+      deathSent=true;
+      statusEl.textContent='You died';
+      deathMessage.textContent=`You reached length ${Math.floor(player.length)}. Your mass was dropped as orbs.`;
+      deathScreen.classList.remove('hidden');
+      render(performance.now());
+    }
+
     socket.send(JSON.stringify({
       type:'collision',
       victimId:victim.id,
       x:victim.x,
       y:victim.y,
-      body:sampleBody(victim)
+      body
     }));
-
-    victim.alive=false;
   }
 
   function dieLocally(){
-    if(deathSent)return;
-    deathSent=true;
+    if(!player)return;
+
+    player.alive=false;
+    player.speed=0;
     running=false;
+    loopToken+=1;
     input.boost=false;
     input.active=false;
+    deathSent=true;
     statusEl.textContent='You died';
-    deathMessage.textContent=`You reached length ${Math.floor(player?.length || 24)}. Your mass was dropped as orbs.`;
+    deathMessage.textContent=`You reached length ${Math.floor(player.length)}. Your mass was dropped as orbs.`;
     deathScreen.classList.remove('hidden');
     render(performance.now());
   }
 
   function resetPlayerForRespawn(){
-    const spawnX=WORLD/2+random(-500,500);
-    const spawnY=WORLD/2+random(-500,500);
+    const spawnX=WORLD/2+random(-1200,1200);
+    const spawnY=WORLD/2+random(-1200,1200);
     const name=(nameInput.value.trim()||'Player').slice(0,16);
 
     player=makeSnake({
@@ -638,7 +657,7 @@
   }
 
   function update(dt,now){
-    if(!player)return;
+    if(!player || !player.alive || !running)return;
 
     if(input.active){
       const dx=input.x-W/2,dy=input.y-H/2;

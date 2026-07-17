@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 
-const MAX_SLOTS = 32;
-const WORLD = 4200;
+const MAX_SLOTS = 16;
+const WORLD = 6200;
 const START_LENGTH = 24;
 const BOT_NAMES = [
   "ByteBite", "NoodleKing", "LagWizard", "PixelPete", "TurboWorm",
@@ -33,23 +33,22 @@ export class GlobalLobby extends DurableObject {
     this.bots = new Map();
     this.lastBotUpdate = Date.now();
     this.lastBroadcast = 0;
-    this.ensureBots();
+    this.lastBotFill = 0;
+    this.ensureBots(true);
   }
 
   makeBot(index) {
     const generation = crypto.randomUUID().slice(0, 8);
 
-    // Spread the 32 logical slots around the arena rather than spawning
-    // everybody near the same random target.
-    const columns = 6;
-    const rows = 6;
+    const columns = 4;
+    const rows = 4;
     const column = index % columns;
     const row = Math.floor(index / columns) % rows;
-    const cellWidth = (WORLD - 700) / columns;
-    const cellHeight = (WORLD - 700) / rows;
+    const cellWidth = (WORLD - 1200) / columns;
+    const cellHeight = (WORLD - 1200) / rows;
 
-    const x = 350 + column * cellWidth + Math.random() * cellWidth * 0.65;
-    const y = 350 + row * cellHeight + Math.random() * cellHeight * 0.65;
+    const x = 600 + column * cellWidth + Math.random() * cellWidth * 0.55;
+    const y = 600 + row * cellHeight + Math.random() * cellHeight * 0.55;
 
     return {
       id: `bot-${index}-${generation}`,
@@ -60,9 +59,9 @@ export class GlobalLobby extends DurableObject {
       angle: Math.random() * Math.PI * 2,
       targetAngle: Math.random() * Math.PI * 2,
       hue: (index * 47 + 25) % 360,
-      length: START_LENGTH + Math.random() * 28,
+      length: START_LENGTH + Math.random() * 18,
       radius: 10,
-      speed: 95 + Math.random() * 38,
+      speed: 88 + Math.random() * 24,
       alive: true,
       stuckTime: 0,
       lastX: x,
@@ -70,8 +69,15 @@ export class GlobalLobby extends DurableObject {
     };
   }
 
-  ensureBots() {
+  ensureBots(force = false) {
+    const now = Date.now();
     const needed = Math.max(0, MAX_SLOTS - this.players.size);
+
+    // Do not instantly refill repeatedly during joins, reconnects, or deaths.
+    if (!force && now - this.lastBotFill < 1800) {
+      return;
+    }
+    this.lastBotFill = now;
 
     while (this.bots.size < needed) {
       const occupiedSlots = new Set(
@@ -82,6 +88,29 @@ export class GlobalLobby extends DurableObject {
       while (occupiedSlots.has(index)) index++;
 
       const bot = this.makeBot(index);
+
+      // Reject crowded spawn points.
+      let attempts = 0;
+      while (attempts < 24) {
+        let crowded = false;
+
+        for (const other of [
+          ...this.players.values(),
+          ...this.bots.values()
+        ]) {
+          if (Math.hypot(bot.x - other.x, bot.y - other.y) < 520) {
+            crowded = true;
+            break;
+          }
+        }
+
+        if (!crowded) break;
+
+        bot.x = 450 + Math.random() * (WORLD - 900);
+        bot.y = 450 + Math.random() * (WORLD - 900);
+        attempts++;
+      }
+
       this.bots.set(bot.id, bot);
     }
 
@@ -140,7 +169,7 @@ export class GlobalLobby extends DurableObject {
 
         // Strong local repulsion prevents rainbow stacking.
         // Bots separate more strongly from other bots than from prey.
-        const separationRadius = other.isHuman ? 80 : 145;
+        const separationRadius = other.isHuman ? 105 : 190;
         if (distance < separationRadius) {
           const strength = (separationRadius - distance) / separationRadius;
           separationX -= dx / distance * strength;
@@ -159,7 +188,7 @@ export class GlobalLobby extends DurableObject {
           }
         }
 
-        if (sizeRatio < 0.96 && distance < 900) {
+        if (sizeRatio < 0.92 && distance < 760) {
           const humanBonus = other.isHuman ? 260 : 0;
           const sizeBonus = (1 - sizeRatio) * 300;
           const score = 1100 - distance + humanBonus + sizeBonus;
@@ -177,7 +206,7 @@ export class GlobalLobby extends DurableObject {
         // At very close range, separation overrides hunting completely.
         if (separationStrength > 0.55 || dangerouslyStacked) {
           bot.targetAngle = separationAngle;
-          bot.speed = 165;
+          bot.speed = 138;
         } else {
           // Otherwise blend separation into the current intended path.
           const intendedX = Math.cos(bot.targetAngle);
@@ -191,7 +220,7 @@ export class GlobalLobby extends DurableObject {
         const away = Math.atan2(bot.y - nearestThreat.y, bot.x - nearestThreat.x);
         const sidestep = Math.sin(now / 480 + bot.hue) * 0.55;
         bot.targetAngle = away + sidestep;
-        bot.speed = 150;
+        bot.speed = 132;
       } else if (bestTarget) {
         const leadDistance = Math.min(150, 45 + (bestTarget.speed || 120) * 0.5);
         const targetX = bestTarget.x + Math.cos(bestTarget.angle || 0) * leadDistance;
@@ -208,7 +237,7 @@ export class GlobalLobby extends DurableObject {
           targetY + sideY - bot.y,
           targetX + sideX - bot.x
         );
-        bot.speed = 142 + ((Number(bot.slot) || 0) % 5) * 3;
+        bot.speed = 122 + ((Number(bot.slot) || 0) % 5) * 2;
       } else {
         if (Math.random() < dt * 0.9) {
           bot.targetAngle += (Math.random() - 0.5) * 1.3;
@@ -332,7 +361,7 @@ export class GlobalLobby extends DurableObject {
           this.bots.set(replacement.id, replacement);
           this.broadcast(this.roster());
         }
-      }, 1400);
+      }, 5000);
     }
   }
 
@@ -364,7 +393,7 @@ export class GlobalLobby extends DurableObject {
       updatedAt: Date.now()
     });
 
-    this.ensureBots();
+    this.ensureBots(false);
     server.send(JSON.stringify({ type: "welcome", id, maxSlots: MAX_SLOTS }));
     server.send(JSON.stringify(this.roster()));
     this.broadcast(this.roster());
@@ -415,7 +444,7 @@ export class GlobalLobby extends DurableObject {
   webSocketClose(socket) {
     const id = this.ctx.getTags(socket)[0];
     this.players.delete(id);
-    this.ensureBots();
+    this.ensureBots(false);
     this.broadcast(this.roster());
   }
 
