@@ -5,29 +5,33 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>Neon Serpents</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; }
-    * { box-sizing: border-box; }
+    :root { color-scheme:dark; font-family:Inter,system-ui,sans-serif; }
+    * { box-sizing:border-box; }
     body { margin:0; overflow:hidden; background:#060811; color:#eef5ff; }
     canvas { display:block; width:100vw; height:100dvh; touch-action:none; cursor:crosshair; }
     .hud { position:fixed; inset:10px 10px auto; display:flex; justify-content:space-between; gap:8px; pointer-events:none; }
     .group { display:flex; flex-wrap:wrap; gap:7px; }
-    .pill { padding:7px 10px; border:1px solid #ffffff1c; border-radius:999px; background:#070b16ca; backdrop-filter:blur(10px); font-size:13px; }
+    .pill,.leaderboard { border:1px solid #ffffff1c; background:#070b16d8; backdrop-filter:blur(10px); }
+    .pill { padding:7px 10px; border-radius:999px; font-size:13px; }
+    .leaderboard { position:fixed; right:10px; top:54px; width:210px; padding:10px; border-radius:15px; pointer-events:none; }
+    .leaderboard h2 { margin:0 0 7px; font-size:13px; color:#9eacc0; text-transform:uppercase; letter-spacing:.08em; }
+    .leader-row { display:grid; grid-template-columns:22px 1fr auto; gap:5px; align-items:center; padding:3px 0; font-size:12px; }
+    .leader-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .leader-size { color:#75e8ff; font-variant-numeric:tabular-nums; }
     .overlay { position:fixed; inset:0; display:grid; place-items:center; padding:18px; background:#02040a9c; backdrop-filter:blur(8px); }
     .card { width:min(390px,100%); padding:22px; border:1px solid #ffffff18; border-radius:22px; background:#090d19ed; box-shadow:0 20px 70px #0009; }
     h1 { margin:0 0 8px; font-size:28px; }
     p { color:#aebbd0; line-height:1.45; }
     label { display:block; margin:14px 0 6px; color:#c8d3e3; font-size:13px; }
     input { width:100%; padding:11px 12px; border:1px solid #ffffff20; border-radius:12px; background:#ffffff0b; color:white; font-size:16px; outline:none; }
-    input:focus { border-color:#3fdcff; }
     button { width:100%; margin-top:14px; padding:12px 14px; border:0; border-radius:12px; background:#2bd4f3; color:#031017; font-weight:800; cursor:pointer; }
-    .small { font-size:12px; }
-    .hidden { display:none !important; }
-    #error { color:#ff9eae; min-height:18px; }
-    @media(max-width:560px){ .pill { font-size:12px; padding:6px 8px; } .optional { display:none; } }
+    .small { font-size:12px; } .hidden { display:none!important; } #error { color:#ff9eae; min-height:18px; }
+    @media(max-width:650px){ .leaderboard{width:170px;top:50px}.leader-row{font-size:11px}.optional{display:none}.pill{font-size:12px;padding:6px 8px} }
   </style>
 </head>
 <body>
 <canvas id="game"></canvas>
+
 <div class="hud">
   <div class="group">
     <div class="pill">Score <b id="score">0</b></div>
@@ -38,243 +42,333 @@
     <div class="pill optional" id="status">Connecting…</div>
   </div>
 </div>
+
+<aside class="leaderboard">
+  <h2>Top 10</h2>
+  <div id="leaderRows"></div>
+</aside>
+
 <div class="overlay" id="menu">
   <div class="card">
     <h1>Neon Serpents</h1>
-    <p>One global lobby. Human players join automatically and bots fill the remaining 32 slots.</p>
+    <p>One global 32-slot lobby. Bots automatically fill empty slots.</p>
     <label for="name">Player name</label>
     <input id="name" maxlength="16" value="Player" />
     <button id="play" type="button">Join global lobby</button>
     <p id="error" class="small"></p>
-    <p class="small">Steer with mouse or touch. Hold click, touch, or Space to boost. You can cross your own body.</p>
+    <p class="small">Cross your own body safely. Anyone who hits another snake's body dies and drops their mass as orbs.</p>
   </div>
 </div>
+
 <script>
 (() => {
-  const canvas = document.querySelector('#game');
-  const ctx = canvas.getContext('2d');
-  const menu = document.querySelector('#menu');
-  const playButton = document.querySelector('#play');
-  const nameInput = document.querySelector('#name');
-  const errorEl = document.querySelector('#error');
-  const statusEl = document.querySelector('#status');
-  const slotsEl = document.querySelector('#slots');
-  const scoreEl = document.querySelector('#score');
-  const lengthEl = document.querySelector('#length');
+  const canvas=document.querySelector('#game'),ctx=canvas.getContext('2d');
+  const menu=document.querySelector('#menu'),playButton=document.querySelector('#play');
+  const nameInput=document.querySelector('#name'),errorEl=document.querySelector('#error');
+  const statusEl=document.querySelector('#status'),slotsEl=document.querySelector('#slots');
+  const scoreEl=document.querySelector('#score'),lengthEl=document.querySelector('#length');
+  const leaderRows=document.querySelector('#leaderRows');
 
-  const WORLD = 4200;
-  const FOOD_COUNT = 520;
-  const input = { x: 0, y: 0, active: false, boost: false };
-  const camera = { x: WORLD / 2, y: WORLD / 2, zoom: 1 };
-  const remotes = new Map();
-  let W = innerWidth, H = innerHeight, dpr = 1;
-  let socket = null, playerId = null, player = null, foods = [], score = 0;
-  let running = false, last = performance.now(), lastSend = 0;
+  const WORLD=4200, BASE_FOOD=520;
+  const input={x:0,y:0,active:false,boost:false};
+  const camera={x:WORLD/2,y:WORLD/2,zoom:1};
+  const remotes=new Map();
+  let W=innerWidth,H=innerHeight,dpr=1,socket=null,playerId=null,player=null;
+  let foods=[],score=0,running=false,last=performance.now(),lastSend=0,deathSent=false;
 
-  const random = (a,b) => a + Math.random() * (b-a);
-  const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
-  const angleDelta = (a,b) => Math.atan2(Math.sin(a-b),Math.cos(a-b));
+  const random=(a,b)=>a+Math.random()*(b-a);
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const angleDelta=(a,b)=>Math.atan2(Math.sin(a-b),Math.cos(a-b));
 
-  function resize() {
-    W = innerWidth; H = innerHeight; dpr = Math.min(devicePixelRatio || 1, 2);
-    canvas.width = Math.floor(W*dpr); canvas.height = Math.floor(H*dpr);
-    ctx.setTransform(dpr,0,0,dpr,0,0);
-    input.x = W/2; input.y = H/2;
+  function resize(){
+    W=innerWidth;H=innerHeight;dpr=Math.min(devicePixelRatio||1,2);
+    canvas.width=Math.floor(W*dpr);canvas.height=Math.floor(H*dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);input.x=W/2;input.y=H/2;
   }
-  addEventListener('resize', resize); resize();
+  addEventListener('resize',resize);resize();
 
-  function makeSnake(data, kind='remote') {
-    const snake = {
-      id:data.id, name:data.name, x:data.x, y:data.y, angle:data.angle || 0,
-      target:data.angle || 0, hue:data.hue || 190, length:data.length || 24,
-      radius:data.radius || 10, speed:150, kind, alive:data.alive !== false,
-      segments:[], netX:data.x, netY:data.y, netAngle:data.angle || 0
-    };
-    for(let i=0;i<Math.floor(snake.length);i++) snake.segments.push({x:snake.x-i*8,y:snake.y});
-    return snake;
+  function makeSnake(data,kind='remote'){
+    const s={id:data.id,name:data.name,x:data.x,y:data.y,angle:data.angle||0,target:data.angle||0,
+      hue:data.hue||190,length:data.length||24,radius:data.radius||10,speed:150,kind,
+      alive:data.alive!==false,segments:[],netX:data.x,netY:data.y,netAngle:data.angle||0};
+    for(let i=0;i<Math.floor(s.length);i++)s.segments.push({x:s.x-i*8,y:s.y});
+    return s;
   }
 
-  function makeFood() {
-    return {x:random(50,WORLD-50),y:random(50,WORLD-50),r:random(3,5),hue:random(0,360),phase:random(0,7)};
+  function makeFood(x=random(50,WORLD-50),y=random(50,WORLD-50),value=1,hue=random(0,360)){
+    return {x,y,value,r:clamp(3+value*.35,3,8),hue,phase:random(0,7)};
   }
 
-  function updateSegments(snake) {
-    if (!snake.segments.length) snake.segments.push({x:snake.x,y:snake.y});
-    snake.segments[0].x = snake.x; snake.segments[0].y = snake.y;
-    const spacing = Math.max(6.5,snake.radius*.8);
-    for(let i=1;i<snake.segments.length;i++) {
-      const a=snake.segments[i-1], b=snake.segments[i];
-      const dx=a.x-b.x, dy=a.y-b.y, distance=Math.hypot(dx,dy)||1;
-      b.x=a.x-dx/distance*spacing; b.y=a.y-dy/distance*spacing;
+  function spawnDeathOrbs(data){
+    const orbCount=clamp(Math.round(data.length*.7),16,260);
+    const value=Math.max(1,data.length/orbCount);
+    for(let i=0;i<orbCount;i++){
+      const angle=random(0,Math.PI*2);
+      const distance=Math.sqrt(Math.random())*Math.min(150,30+data.length*.7);
+      foods.push(makeFood(data.x+Math.cos(angle)*distance,data.y+Math.sin(angle)*distance,value,data.hue));
     }
-    const wanted=Math.max(15,Math.floor(snake.length));
-    while(snake.segments.length<wanted){const tail=snake.segments.at(-1);snake.segments.push({x:tail.x,y:tail.y});}
-    while(snake.segments.length>wanted) snake.segments.pop();
   }
 
-  function connect() {
-    errorEl.textContent = '';
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    socket = new WebSocket(`${protocol}//${location.host}/ws`);
-    statusEl.textContent = 'Connecting…';
+  function updateSegments(s){
+    if(!s.segments.length)s.segments.push({x:s.x,y:s.y});
+    s.segments[0].x=s.x;s.segments[0].y=s.y;
+    const spacing=Math.max(6.5,s.radius*.8);
+    for(let i=1;i<s.segments.length;i++){
+      const a=s.segments[i-1],b=s.segments[i],dx=a.x-b.x,dy=a.y-b.y,d=Math.hypot(dx,dy)||1;
+      b.x=a.x-dx/d*spacing;b.y=a.y-dy/d*spacing;
+    }
+    const wanted=Math.max(15,Math.floor(s.length));
+    while(s.segments.length<wanted){const t=s.segments.at(-1);s.segments.push({x:t.x,y:t.y});}
+    while(s.segments.length>wanted)s.segments.pop();
+  }
 
-    socket.addEventListener('open', () => {
-      statusEl.textContent = 'Online';
-      menu.classList.add('hidden');
-      foods = Array.from({length:FOOD_COUNT},makeFood);
-      running = true; last = performance.now(); requestAnimationFrame(loop);
+  function updateLeaderboard(entities){
+    const sorted=[...entities].filter(e=>e.alive!==false).sort((a,b)=>b.length-a.length).slice(0,10);
+    leaderRows.innerHTML=sorted.map((e,i)=>
+      `<div class="leader-row"><span>${i+1}</span><span class="leader-name">${escapeHtml(e.name)}</span><b class="leader-size">${Math.floor(e.length)}</b></div>`
+    ).join('');
+  }
+  function escapeHtml(text){
+    return String(text).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function connect(){
+    errorEl.textContent='';deathSent=false;
+    const protocol=location.protocol==='https:'?'wss:':'ws:';
+    socket=new WebSocket(`${protocol}//${location.host}/ws`);
+    statusEl.textContent='Connecting…';
+
+    socket.addEventListener('open',()=>{
+      statusEl.textContent='Online';menu.classList.add('hidden');
+      foods=Array.from({length:BASE_FOOD},()=>makeFood());
+      running=true;last=performance.now();requestAnimationFrame(loop);
     });
 
-    socket.addEventListener('message', event => {
-      const data = JSON.parse(event.data);
-      if (data.type === 'welcome') {
-        playerId = data.id;
-        player = makeSnake({
-          id:playerId, name:(nameInput.value.trim()||'Player').slice(0,16),
-          x:WORLD/2+random(-250,250), y:WORLD/2+random(-250,250),
-          angle:random(0,Math.PI*2), hue:random(175,220), length:24, radius:10
-        }, 'player');
-        camera.x=player.x; camera.y=player.y;
+    socket.addEventListener('message',event=>{
+      const data=JSON.parse(event.data);
+
+      if(data.type==='welcome'){
+        playerId=data.id;
+        player=makeSnake({
+          id:playerId,name:(nameInput.value.trim()||'Player').slice(0,16),
+          x:WORLD/2+random(-250,250),y:WORLD/2+random(-250,250),
+          angle:random(0,Math.PI*2),hue:random(175,220),length:24,radius:10
+        },'player');
+        camera.x=player.x;camera.y=player.y;
       }
-      if (data.type === 'snapshot') {
-        slotsEl.textContent = data.humans;
-        const seen = new Set();
-        for (const entity of data.entities) {
-          if (entity.id === playerId) continue;
+
+      if(data.type==='snapshot'){
+        slotsEl.textContent=data.humans;
+        updateLeaderboard(data.entities);
+        const seen=new Set();
+
+        for(const entity of data.entities){
+          if(entity.id===playerId){
+            if(player && entity.alive===false && player.alive){
+              player.alive=false;dieLocally();
+            }
+            continue;
+          }
+
           seen.add(entity.id);
-          let snake = remotes.get(entity.id);
-          if (!snake) {
-            snake = makeSnake(entity, entity.id.startsWith('bot-') ? 'bot' : 'remote');
+          let snake=remotes.get(entity.id);
+          if(!snake){
+            snake=makeSnake(entity,entity.id.startsWith('bot-')?'bot':'remote');
             remotes.set(entity.id,snake);
           }
-          snake.name=entity.name; snake.hue=entity.hue; snake.length=entity.length;
-          snake.radius=entity.radius; snake.alive=entity.alive !== false;
-          snake.netX=entity.x; snake.netY=entity.y; snake.netAngle=entity.angle;
+          snake.name=entity.name;snake.hue=entity.hue;snake.length=entity.length;
+          snake.radius=entity.radius;snake.alive=entity.alive!==false;
+          snake.netX=entity.x;snake.netY=entity.y;snake.netAngle=entity.angle;
         }
-        for (const id of remotes.keys()) if(!seen.has(id)) remotes.delete(id);
+        for(const id of remotes.keys())if(!seen.has(id))remotes.delete(id);
+      }
+
+      if(data.type==='death'){
+        spawnDeathOrbs(data);
+        const snake=remotes.get(data.id);
+        if(snake)snake.alive=false;
+        if(data.id===playerId && player?.alive){
+          player.alive=false;dieLocally();
+        }
       }
     });
 
-    socket.addEventListener('close', event => {
-      running = false;
-      statusEl.textContent = 'Disconnected';
-      menu.classList.remove('hidden');
-      errorEl.textContent = event.code === 1006 ? 'Connection lost. Press Join to reconnect.' : 'Disconnected.';
+    socket.addEventListener('close',event=>{
+      running=false;statusEl.textContent='Disconnected';menu.classList.remove('hidden');
+      errorEl.textContent=event.code===1006?'Connection lost. Press Join to reconnect.':'Disconnected.';
     });
-
-    socket.addEventListener('error', () => {
-      errorEl.textContent = 'Could not connect to the global lobby.';
-    });
+    socket.addEventListener('error',()=>errorEl.textContent='Could not connect to the global lobby.');
   }
 
-  playButton.addEventListener('click', connect);
-  canvas.addEventListener('pointermove', e => { input.x=e.clientX; input.y=e.clientY; input.active=true; });
-  canvas.addEventListener('pointerdown', e => { input.x=e.clientX; input.y=e.clientY; input.active=true; input.boost=true; });
-  canvas.addEventListener('pointerup', () => input.boost=false);
-  canvas.addEventListener('pointercancel', () => input.boost=false);
-  addEventListener('keydown', e => { if(e.code==='Space'){e.preventDefault();input.boost=true;} });
-  addEventListener('keyup', e => { if(e.code==='Space') input.boost=false; });
+  playButton.addEventListener('click',connect);
+  canvas.addEventListener('pointermove',e=>{input.x=e.clientX;input.y=e.clientY;input.active=true;});
+  canvas.addEventListener('pointerdown',e=>{input.x=e.clientX;input.y=e.clientY;input.active=true;input.boost=true;});
+  canvas.addEventListener('pointerup',()=>input.boost=false);
+  canvas.addEventListener('pointercancel',()=>input.boost=false);
+  addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();input.boost=true;}});
+  addEventListener('keyup',e=>{if(e.code==='Space')input.boost=false;});
 
-  function update(dt, now) {
-    if (!player) return;
-    if (input.active) {
-      const dx=input.x-W/2, dy=input.y-H/2;
-      if(dx*dx+dy*dy>25) player.target=Math.atan2(dy,dx);
+  function reportCollision(victim){
+    if(!socket||socket.readyState!==WebSocket.OPEN||!victim.alive)return;
+    socket.send(JSON.stringify({type:'collision',victimId:victim.id,x:victim.x,y:victim.y}));
+    victim.alive=false;
+  }
+
+  function dieLocally(){
+    if(deathSent)return;
+    deathSent=true;running=false;statusEl.textContent='You crashed';
+    setTimeout(()=>location.reload(),1500);
+  }
+
+  function checkCollisions(){
+    if(!player?.alive)return;
+
+    // Your head into somebody else's body => you die.
+    for(const snake of remotes.values()){
+      if(!snake.alive)continue;
+      for(let i=5;i<snake.segments.length;i+=2){
+        const p=snake.segments[i];
+        if((p.x-player.x)**2+(p.y-player.y)**2<(player.radius+snake.radius*.55)**2){
+          reportCollision(player);
+          return;
+        }
+      }
     }
-    player.angle += clamp(angleDelta(player.target,player.angle),-4.5*dt,4.5*dt);
-    const boosting=input.boost && player.length>20;
+
+    // Somebody else's head into your body => they die.
+    // Start deeper into your body so touching your head is not mistaken for body collision.
+    for(const snake of remotes.values()){
+      if(!snake.alive)continue;
+      for(let i=8;i<player.segments.length;i+=2){
+        const p=player.segments[i];
+        if((p.x-snake.x)**2+(p.y-snake.y)**2<(snake.radius+player.radius*.55)**2){
+          reportCollision(snake);
+          break;
+        }
+      }
+    }
+  }
+
+  function update(dt,now){
+    if(!player)return;
+
+    if(input.active){
+      const dx=input.x-W/2,dy=input.y-H/2;
+      if(dx*dx+dy*dy>25)player.target=Math.atan2(dy,dx);
+    }
+    player.angle+=clamp(angleDelta(player.target,player.angle),-4.5*dt,4.5*dt);
+    const boosting=input.boost&&player.length>20;
     const desiredSpeed=155*(boosting?1.72:1);
-    player.speed += (desiredSpeed-player.speed)*Math.min(1,dt*9);
-    player.x += Math.cos(player.angle)*player.speed*dt;
-    player.y += Math.sin(player.angle)*player.speed*dt;
-    player.x=clamp(player.x,25,WORLD-25); player.y=clamp(player.y,25,WORLD-25);
+    player.speed+=(desiredSpeed-player.speed)*Math.min(1,dt*9);
+    player.x+=Math.cos(player.angle)*player.speed*dt;
+    player.y+=Math.sin(player.angle)*player.speed*dt;
+    player.x=clamp(player.x,25,WORLD-25);player.y=clamp(player.y,25,WORLD-25);
     if(player.x<110)player.target=0;if(player.x>WORLD-110)player.target=Math.PI;
     if(player.y<110)player.target=Math.PI/2;if(player.y>WORLD-110)player.target=-Math.PI/2;
-    if(boosting) player.length-=dt*1.4;
+    if(boosting)player.length-=dt*1.4;
     updateSegments(player);
 
-    for(const snake of remotes.values()) {
-      snake.x += (snake.netX-snake.x)*Math.min(1,dt*10);
-      snake.y += (snake.netY-snake.y)*Math.min(1,dt*10);
-      snake.angle += angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*10);
+    for(const snake of remotes.values()){
+      snake.x+=(snake.netX-snake.x)*Math.min(1,dt*10);
+      snake.y+=(snake.netY-snake.y)*Math.min(1,dt*10);
+      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*10);
       updateSegments(snake);
     }
 
-    for(let i=foods.length-1;i>=0;i--) {
+    for(let i=foods.length-1;i>=0;i--){
       const f=foods[i];
-      if((f.x-player.x)**2+(f.y-player.y)**2 < (player.radius+8)**2) {
-        foods.splice(i,1); foods.push(makeFood()); player.length+=.5; score+=10;
+      if((f.x-player.x)**2+(f.y-player.y)**2<(player.radius+8)**2){
+        foods.splice(i,1);
+        player.length+=f.value*.5;
+        score+=Math.round(10*f.value);
+        if(foods.length<BASE_FOOD)foods.push(makeFood());
       }
     }
 
-    // Self-collision is deliberately omitted. Only other snakes are dangerous.
-    for(const snake of remotes.values()) {
-      if(!snake.alive) continue;
-      for(let i=5;i<snake.segments.length;i+=2) {
-        const part=snake.segments[i];
-        if((part.x-player.x)**2+(part.y-player.y)**2 < (player.radius+snake.radius*.55)**2) {
-          player.alive=false; running=false; statusEl.textContent='You crashed';
-          setTimeout(()=>location.reload(),1200); return;
-        }
-      }
-    }
+    // Self-collision remains intentionally disabled.
+    checkCollisions();
 
-    camera.x += (player.x-camera.x)*Math.min(1,dt*6);
-    camera.y += (player.y-camera.y)*Math.min(1,dt*6);
-    const targetZoom=clamp(.98-player.length/520,.62,1);
-    camera.zoom += (targetZoom-camera.zoom)*Math.min(1,dt*3);
+    camera.x+=(player.x-camera.x)*Math.min(1,dt*6);
+    camera.y+=(player.y-camera.y)*Math.min(1,dt*6);
+    camera.zoom+=(clamp(.98-player.length/520,.62,1)-camera.zoom)*Math.min(1,dt*3);
 
-    scoreEl.textContent=score; lengthEl.textContent=Math.floor(player.length);
-    if(socket?.readyState===WebSocket.OPEN && now-lastSend>50) {
+    scoreEl.textContent=score;lengthEl.textContent=Math.floor(player.length);
+
+    if(socket?.readyState===WebSocket.OPEN&&now-lastSend>50){
       lastSend=now;
-      socket.send(JSON.stringify({type:'state',name:player.name,x:player.x,y:player.y,
-        angle:player.angle,hue:player.hue,length:player.length,radius:player.radius,alive:player.alive}));
+      socket.send(JSON.stringify({
+        type:'state',name:player.name,x:player.x,y:player.y,angle:player.angle,
+        hue:player.hue,length:player.length,radius:player.radius,alive:player.alive
+      }));
     }
   }
 
   function worldToScreen(x,y){return{x:(x-camera.x)*camera.zoom+W/2,y:(y-camera.y)*camera.zoom+H/2};}
   function drawBackground(){
     ctx.fillStyle='#070a13';ctx.fillRect(0,0,W,H);
-    const grid=70*camera.zoom, ox=((-camera.x*camera.zoom+W/2)%grid+grid)%grid,
-      oy=((-camera.y*camera.zoom+H/2)%grid+grid)%grid;
+    const grid=70*camera.zoom,ox=((-camera.x*camera.zoom+W/2)%grid+grid)%grid,oy=((-camera.y*camera.zoom+H/2)%grid+grid)%grid;
     ctx.beginPath();
     for(let x=ox;x<W;x+=grid){ctx.moveTo(x,0);ctx.lineTo(x,H);}
     for(let y=oy;y<H;y+=grid){ctx.moveTo(0,y);ctx.lineTo(W,y);}
     ctx.strokeStyle='rgba(125,165,225,.055)';ctx.stroke();
   }
   function drawFood(time){
-    for(const f of foods){const p=worldToScreen(f.x,f.y);if(p.x<-20||p.y<-20||p.x>W+20||p.y>H+20)continue;
+    for(const f of foods){
+      const p=worldToScreen(f.x,f.y);if(p.x<-20||p.y<-20||p.x>W+20||p.y>H+20)continue;
       const r=f.r*camera.zoom*(1+Math.sin(time*.004+f.phase)*.18);
       ctx.beginPath();ctx.arc(p.x,p.y,r*2.3,0,7);ctx.fillStyle=`hsla(${f.hue},95%,62%,.12)`;ctx.fill();
-      ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);ctx.fillStyle=`hsl(${f.hue},95%,68%)`;ctx.fill();}
+      ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);ctx.fillStyle=`hsl(${f.hue},95%,68%)`;ctx.fill();
+    }
   }
-  function drawLabel(snake,head,radius){
-    ctx.font='500 12px system-ui';ctx.textAlign='center';const y=head.y-radius-11;
-    const width=ctx.measureText(snake.name).width+12;ctx.fillStyle='rgba(5,8,18,.78)';
-    ctx.fillRect(head.x-width/2,y-17,width,20);ctx.fillStyle=snake.kind==='bot'?'#cbd5e1':'#fff';ctx.fillText(snake.name,head.x,y-3);
+  function drawLabel(s,head,r){
+    ctx.font='500 12px system-ui';ctx.textAlign='center';
+    const y=head.y-r-11,w=ctx.measureText(s.name).width+12;
+    ctx.fillStyle='rgba(5,8,18,.78)';ctx.fillRect(head.x-w/2,y-17,w,20);
+    ctx.fillStyle=s.kind==='bot'?'#cbd5e1':'#fff';ctx.fillText(s.name,head.x,y-3);
   }
-  function drawSnake(snake){
-    if(!snake.alive)return;const radius=snake.radius*camera.zoom;
-    for(let i=snake.segments.length-1;i>=0;i--){const p=worldToScreen(snake.segments[i].x,snake.segments[i].y);
+  function drawSnake(s){
+    if(!s.alive)return;const radius=s.radius*camera.zoom;
+    for(let i=s.segments.length-1;i>=0;i--){
+      const p=worldToScreen(s.segments[i].x,s.segments[i].y);
       if(p.x<-45||p.y<-45||p.x>W+45||p.y>H+45)continue;
-      const r=radius*clamp((snake.segments.length-i)/9,.45,1);ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);
-      ctx.fillStyle=`hsl(${snake.hue},76%,${i%2?46:55}%)`;ctx.fill();}
-    const head=worldToScreen(snake.x,snake.y),fx=Math.cos(snake.angle),fy=Math.sin(snake.angle),sx=-fy,sy=fx;
-    for(const side of [-1,1]){const ex=head.x+fx*radius*.44+sx*radius*.48*side,ey=head.y+fy*radius*.44+sy*radius*.48*side;
+      const r=radius*clamp((s.segments.length-i)/9,.45,1);
+      ctx.beginPath();ctx.arc(p.x,p.y,r,0,7);
+      ctx.fillStyle=`hsl(${s.hue},76%,${i%2?46:55}%)`;ctx.fill();
+    }
+    const head=worldToScreen(s.x,s.y),fx=Math.cos(s.angle),fy=Math.sin(s.angle),sx=-fy,sy=fx;
+    for(const side of [-1,1]){
+      const ex=head.x+fx*radius*.44+sx*radius*.48*side,ey=head.y+fy*radius*.44+sy*radius*.48*side;
       ctx.beginPath();ctx.arc(ex,ey,Math.max(2.4,radius*.3),0,7);ctx.fillStyle='#fff';ctx.fill();
-      ctx.beginPath();ctx.arc(ex+fx*radius*.1,ey+fy*radius*.1,Math.max(1.2,radius*.14),0,7);ctx.fillStyle='#111827';ctx.fill();}
-    drawLabel(snake,head,radius);
+      ctx.beginPath();ctx.arc(ex+fx*radius*.1,ey+fy*radius*.1,Math.max(1.2,radius*.14),0,7);ctx.fillStyle='#111827';ctx.fill();
+    }
+    drawLabel(s,head,radius);
   }
   function drawMinimap(){
-    const size=82,x=W-size-12,y=H-size-12;ctx.fillStyle='rgba(5,8,18,.78)';ctx.fillRect(x,y,size,size);
+    const size=82,x=W-size-12,y=H-size-12;
+    ctx.fillStyle='rgba(5,8,18,.78)';ctx.fillRect(x,y,size,size);
     ctx.strokeStyle='rgba(255,255,255,.16)';ctx.strokeRect(x,y,size,size);
-    for(const snake of remotes.values()){ctx.beginPath();ctx.arc(x+snake.x/WORLD*size,y+snake.y/WORLD*size,snake.kind==='bot'?1.3:2.1,0,7);
-      ctx.fillStyle=snake.kind==='bot'?'rgba(255,255,255,.38)':'#ffe98a';ctx.fill();}
-    if(player){ctx.beginPath();ctx.arc(x+player.x/WORLD*size,y+player.y/WORLD*size,3,0,7);ctx.fillStyle='#43ddff';ctx.fill();}
+    for(const s of remotes.values()){
+      if(!s.alive)continue;
+      ctx.beginPath();ctx.arc(x+s.x/WORLD*size,y+s.y/WORLD*size,s.kind==='bot'?1.3:2.1,0,7);
+      ctx.fillStyle=s.kind==='bot'?'rgba(255,255,255,.38)':'#ffe98a';ctx.fill();
+    }
+    if(player?.alive){
+      ctx.beginPath();ctx.arc(x+player.x/WORLD*size,y+player.y/WORLD*size,3,0,7);
+      ctx.fillStyle='#43ddff';ctx.fill();
+    }
   }
-  function render(time){ctx.setTransform(dpr,0,0,dpr,0,0);drawBackground();drawFood(time);
-    for(const snake of remotes.values())drawSnake(snake);if(player)drawSnake(player);drawMinimap();}
-  function loop(now){if(!running)return;const dt=Math.min(.04,(now-last)/1000);last=now;update(dt,now);render(now);if(running)requestAnimationFrame(loop);}
+  function render(time){
+    ctx.setTransform(dpr,0,0,dpr,0,0);drawBackground();drawFood(time);
+    for(const s of remotes.values())drawSnake(s);
+    if(player)drawSnake(player);
+    drawMinimap();
+  }
+  function loop(now){
+    if(!running)return;
+    const dt=Math.min(.04,(now-last)/1000);last=now;
+    update(dt,now);render(now);
+    if(running)requestAnimationFrame(loop);
+  }
   render(performance.now());
 })();
 </script>

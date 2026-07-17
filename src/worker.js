@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 
 const MAX_SLOTS = 32;
 const WORLD = 4200;
+const START_LENGTH = 24;
 const BOT_NAMES = [
   "ByteBite", "NoodleKing", "LagWizard", "PixelPete", "TurboWorm",
   "SnackHunter", "CodeCobra", "NeonNora", "GlitchGhost", "ZoomZilla",
@@ -12,13 +13,7 @@ const BOT_NAMES = [
   "TurboTess", "CacheCobra"
 ];
 
-function randomId() {
-  return crypto.randomUUID();
-}
-
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 export default {
   async fetch(request, env) {
@@ -41,23 +36,28 @@ export class GlobalLobby extends DurableObject {
     this.ensureBots();
   }
 
+  makeBot(index) {
+    return {
+      id: `bot-${index}`,
+      name: `${BOT_NAMES[index % BOT_NAMES.length]} (bot)`,
+      x: 250 + Math.random() * (WORLD - 500),
+      y: 250 + Math.random() * (WORLD - 500),
+      angle: Math.random() * Math.PI * 2,
+      targetAngle: Math.random() * Math.PI * 2,
+      hue: (index * 47 + 25) % 360,
+      length: START_LENGTH + Math.random() * 28,
+      radius: 10,
+      speed: 90 + Math.random() * 45,
+      alive: true
+    };
+  }
+
   ensureBots() {
     const needed = Math.max(0, MAX_SLOTS - this.players.size);
     while (this.bots.size < needed) {
-      const index = this.bots.size;
-      const id = `bot-${index}`;
-      this.bots.set(id, {
-        id,
-        name: `${BOT_NAMES[index % BOT_NAMES.length]} (bot)`,
-        x: 250 + Math.random() * (WORLD - 500),
-        y: 250 + Math.random() * (WORLD - 500),
-        angle: Math.random() * Math.PI * 2,
-        targetAngle: Math.random() * Math.PI * 2,
-        hue: (index * 47 + 25) % 360,
-        length: 24 + Math.random() * 20,
-        radius: 10,
-        speed: 90 + Math.random() * 45
-      });
+      let index = 0;
+      while (this.bots.has(`bot-${index}`)) index++;
+      this.bots.set(`bot-${index}`, this.makeBot(index));
     }
     while (this.bots.size > needed) {
       const key = [...this.bots.keys()].at(-1);
@@ -79,6 +79,7 @@ export class GlobalLobby extends DurableObject {
         Math.sin(bot.targetAngle - bot.angle),
         Math.cos(bot.targetAngle - bot.angle)
       );
+
       bot.angle += clamp(delta, -2.2 * dt, 2.2 * dt);
       bot.x += Math.cos(bot.angle) * bot.speed * dt;
       bot.y += Math.sin(bot.angle) * bot.speed * dt;
@@ -93,26 +94,60 @@ export class GlobalLobby extends DurableObject {
     }
   }
 
+  entities() {
+    return [
+      ...[...this.players.values()].map(({ socket, ...player }) => player),
+      ...this.bots.values()
+    ];
+  }
+
   roster() {
     return {
       type: "snapshot",
       maxSlots: MAX_SLOTS,
       humans: this.players.size,
-      entities: [
-        ...[...this.players.values()].map(({ socket, ...player }) => player),
-        ...this.bots.values()
-      ]
+      entities: this.entities()
     };
   }
 
   broadcast(payload) {
     const message = JSON.stringify(payload);
     for (const socket of this.ctx.getWebSockets()) {
-      try {
-        socket.send(message);
-      } catch {
-        // Closed sockets are removed by the runtime.
-      }
+      try { socket.send(message); } catch {}
+    }
+  }
+
+  killEntity(victimId, x, y) {
+    let victim = this.players.get(victimId);
+    let isBot = false;
+
+    if (!victim) {
+      victim = this.bots.get(victimId);
+      isBot = Boolean(victim);
+    }
+    if (!victim || victim.alive === false) return;
+
+    victim.alive = false;
+    const droppedLength = clamp(Number(victim.length) || START_LENGTH, START_LENGTH, 500);
+
+    this.broadcast({
+      type: "death",
+      id: victimId,
+      x: clamp(Number(x) || victim.x, 0, WORLD),
+      y: clamp(Number(y) || victim.y, 0, WORLD),
+      length: droppedLength,
+      hue: victim.hue
+    });
+
+    if (isBot) {
+      const botIndex = Number(victimId.split("-")[1]) || 0;
+      this.bots.delete(victimId);
+      setTimeout(() => {
+        if (this.bots.size < Math.max(0, MAX_SLOTS - this.players.size)) {
+          this.bots.set(victimId, this.makeBot(botIndex));
+          this.broadcast(this.roster());
+        }
+      }, 1400);
     }
   }
 
@@ -127,7 +162,7 @@ export class GlobalLobby extends DurableObject {
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const id = randomId();
+    const id = crypto.randomUUID();
 
     this.ctx.acceptWebSocket(server, [id]);
     this.players.set(id, {
@@ -138,7 +173,7 @@ export class GlobalLobby extends DurableObject {
       y: WORLD / 2 + (Math.random() - 0.5) * 500,
       angle: 0,
       hue: Math.floor(Math.random() * 360),
-      length: 24,
+      length: START_LENGTH,
       radius: 10,
       alive: true,
       updatedAt: Date.now()
@@ -155,24 +190,34 @@ export class GlobalLobby extends DurableObject {
   webSocketMessage(socket, rawMessage) {
     let data;
     try {
-      data = JSON.parse(typeof rawMessage === "string" ? rawMessage : new TextDecoder().decode(rawMessage));
+      data = JSON.parse(
+        typeof rawMessage === "string"
+          ? rawMessage
+          : new TextDecoder().decode(rawMessage)
+      );
     } catch {
       return;
     }
 
-    const id = this.ctx.getTags(socket)[0];
-    const player = this.players.get(id);
-    if (!player || data.type !== "state") return;
+    const senderId = this.ctx.getTags(socket)[0];
+    const player = this.players.get(senderId);
+    if (!player) return;
 
-    player.name = String(data.name || "Player").slice(0, 16);
-    player.x = clamp(Number(data.x) || WORLD / 2, 0, WORLD);
-    player.y = clamp(Number(data.y) || WORLD / 2, 0, WORLD);
-    player.angle = Number(data.angle) || 0;
-    player.hue = clamp(Number(data.hue) || 190, 0, 360);
-    player.length = clamp(Number(data.length) || 24, 15, 500);
-    player.radius = clamp(Number(data.radius) || 10, 7, 24);
-    player.alive = data.alive !== false;
-    player.updatedAt = Date.now();
+    if (data.type === "state") {
+      player.name = String(data.name || "Player").slice(0, 16);
+      player.x = clamp(Number(data.x) || WORLD / 2, 0, WORLD);
+      player.y = clamp(Number(data.y) || WORLD / 2, 0, WORLD);
+      player.angle = Number(data.angle) || 0;
+      player.hue = clamp(Number(data.hue) || 190, 0, 360);
+      player.length = clamp(Number(data.length) || START_LENGTH, 15, 500);
+      player.radius = clamp(Number(data.radius) || 10, 7, 24);
+      player.alive = data.alive !== false;
+      player.updatedAt = Date.now();
+    }
+
+    if (data.type === "collision" && typeof data.victimId === "string") {
+      this.killEntity(data.victimId, data.x, data.y);
+    }
 
     this.updateBots();
     const now = Date.now();
