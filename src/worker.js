@@ -40,6 +40,15 @@ export class GlobalLobby extends DurableObject {
     this.lastBotFill = 0;
     this.lastBotCollisionCheck = 0;
 
+    // Keep-alive: the runtime auto-replies "pong" to a "ping" without even
+    // waking the object. This keeps proxies/load balancers from dropping an
+    // otherwise-quiet connection and avoids hibernation-related closes.
+    try {
+      this.ctx.setWebSocketAutoResponse(
+        new WebSocketRequestResponsePair("ping", "pong")
+      );
+    } catch {}
+
     this.ensureFood();
     this.ensureBots(true);
   }

@@ -108,6 +108,7 @@
   let W=innerWidth,H=innerHeight,dpr=1,socket=null,playerId=null,player=null;
   let foods=[],score=0,running=false,last=performance.now(),lastSend=0,deathSent=false;
   let reconnectTimer=null,reconnectAttempts=0,manualDisconnect=false,hasJoined=false,loopToken=0;
+  let heartbeatTimer=null,lastCloseCode=null;
   const MAX_RECONNECT_DELAY=12000;
 
   const random=(a,b)=>a+Math.random()*(b-a);
@@ -288,7 +289,7 @@
 
     const delay=reconnectDelay();
     reconnectAttempts+=1;
-    reconnectMessage.textContent=`Connection lost. Retrying in ${(delay/1000).toFixed(1)} seconds…`;
+    reconnectMessage.textContent=`Connection lost${lastCloseCode?` (code ${lastCloseCode})`:''}. Retrying in ${(delay/1000).toFixed(1)} seconds…`;
     reconnectTimer=setTimeout(()=>{
       reconnectTimer=null;
       connect(true);
@@ -322,10 +323,22 @@
       last=performance.now();
       loopToken+=1;
       requestAnimationFrame(now=>loop(now,loopToken));
+
+      // Heartbeat: the server auto-replies "pong" without waking, keeping the
+      // connection alive through idle moments (e.g. the death screen).
+      clearInterval(heartbeatTimer);
+      heartbeatTimer=setInterval(()=>{
+        if(socket && socket.readyState===WebSocket.OPEN){
+          try{socket.send('ping');}catch{}
+        }
+      },10000);
     });
 
     socket.addEventListener('message',event=>{
-      const data=JSON.parse(event.data);
+      // Ignore the keep-alive pong and any non-JSON frame.
+      if(typeof event.data!=='string' || event.data==='pong')return;
+      let data;
+      try{data=JSON.parse(event.data);}catch{return;}
 
       if(data.type==='welcome'){
         const previousPlayer=player;
@@ -465,11 +478,17 @@
     socket.addEventListener('close',event=>{
       running=false;
       loopToken+=1;
+      clearInterval(heartbeatTimer);
+
+      // Surface the close code so the real cause is visible (1006 = network
+      // drop, 1011 = server error, 1001 = going away, 1000 = normal).
+      console.warn('WebSocket closed',event.code,event.reason||'');
+      lastCloseCode=event.code;
 
       if(manualDisconnect)return;
       if(!deathScreen.classList.contains('hidden'))return;
 
-      statusEl.textContent='Disconnected';
+      statusEl.textContent=`Disconnected (code ${event.code})`;
 
       if(hasJoined){
         scheduleReconnect();
@@ -909,19 +928,16 @@
         // Body was just rebuilt straight; don't kill anyone against it yet.
         snake.snapUntil=performance.now()+300;
       }else{
-        // Converge on the network position quickly so other players appear
-        // close to real time, but scale the speed with the gap so small
-        // corrections stay smooth instead of stuttering.
-        const maxCatchup=Math.max(420,Math.min(1500,distance*13))*dt;
-        const movement=Math.min(distance,maxCatchup);
-
-        if(distance>.001){
-          snake.x+=dx/distance*movement;
-          snake.y+=dy/distance*movement;
-        }
+        // Exponentially ease toward the latest network position. This is
+        // inherently smooth — unlike a minimum-speed catch-up it never
+        // stair-steps between discrete network updates — while still closing
+        // the gap quickly, so remote snakes and bots stop jittering.
+        const ease=Math.min(1,dt*12);
+        snake.x+=dx*ease;
+        snake.y+=dy*ease;
       }
 
-      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*18);
+      snake.angle+=angleDelta(snake.netAngle,snake.angle)*Math.min(1,dt*12);
       updateSegments(snake);
     }
 
