@@ -96,3 +96,14 @@ Collision reports are detected by clients and accepted by the lobby server. For 
 - Dead remote bodies are removed immediately.
 - Head-to-head overlap no longer counts as a body collision.
 - Only contact with a snake's body beyond its neck causes death.
+
+
+## v1.0.1 collision and growth hotfix
+- Fixed collision checks skipping the entire body of smaller snakes.
+- Added swept collision detection between the previous and current head positions.
+- Fast snakes can no longer tunnel through bodies between frames.
+- Head-to-head contact remains non-lethal.
+- Self-collision remains disabled.
+- Fixed the local player not receiving server-authoritative length growth.
+- Player thickness now updates correctly after eating.
+- Score now increases when server-confirmed growth is received.

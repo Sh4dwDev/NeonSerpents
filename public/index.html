@@ -50,7 +50,7 @@
   <div id="leaderRows"></div>
 </aside>
 
-<div class="version-label">Neon Serpents v1.0.0</div>
+<div class="version-label">Neon Serpents v1.0.1</div>
 
 <div class="overlay" id="menu">
   <div class="card">
@@ -124,7 +124,8 @@
   function makeSnake(data,kind='remote'){
     const s={id:data.id,name:data.name,x:data.x,y:data.y,angle:data.angle||0,target:data.angle||0,
       hue:data.hue||190,length:data.length||24,radius:data.radius||10,speed:150,kind,
-      alive:data.alive!==false,segments:[],netX:data.x,netY:data.y,netAngle:data.angle||0};
+      alive:data.alive!==false,segments:[],netX:data.x,netY:data.y,netAngle:data.angle||0,
+      previousX:data.x,previousY:data.y};
     for(let i=0;i<Math.floor(s.length);i++)s.segments.push({x:s.x-i*8,y:s.y});
     return s;
   }
@@ -375,8 +376,21 @@
             continue;
           }
           if(entity.id===playerId){
-            if(player && entity.alive===false && player.alive){
-              player.alive=false;dieLocally();
+            if(player){
+              if(entity.alive===false && player.alive){
+                player.alive=false;
+                dieLocally();
+              }else if(entity.alive!==false){
+                const serverLength=clamp(Number(entity.length)||player.length,15,700);
+                const gained=Math.max(0,serverLength-player.length);
+
+                player.length=serverLength;
+                player.radius=clamp(Number(entity.radius)||player.radius,10,27);
+
+                if(gained>0){
+                  score+=Math.round(gained*20);
+                }
+              }
             }
             continue;
           }
@@ -635,31 +649,148 @@
   });
   reconnectMenuButton.addEventListener('click',returnToMainMenu);
 
+  function orientation(ax,ay,bx,by,cx,cy){
+    return (bx-ax)*(cy-ay)-(by-ay)*(cx-ax);
+  }
+
+  function onSegment(ax,ay,bx,by,px,py){
+    return (
+      px>=Math.min(ax,bx)-.001 &&
+      px<=Math.max(ax,bx)+.001 &&
+      py>=Math.min(ay,by)-.001 &&
+      py<=Math.max(ay,by)+.001
+    );
+  }
+
+  function segmentsIntersect(a,b,c,d){
+    const o1=orientation(a.x,a.y,b.x,b.y,c.x,c.y);
+    const o2=orientation(a.x,a.y,b.x,b.y,d.x,d.y);
+    const o3=orientation(c.x,c.y,d.x,d.y,a.x,a.y);
+    const o4=orientation(c.x,c.y,d.x,d.y,b.x,b.y);
+
+    if(
+      ((o1>0&&o2<0)||(o1<0&&o2>0)) &&
+      ((o3>0&&o4<0)||(o3<0&&o4>0))
+    ){
+      return true;
+    }
+
+    if(Math.abs(o1)<.001&&onSegment(a.x,a.y,b.x,b.y,c.x,c.y))return true;
+    if(Math.abs(o2)<.001&&onSegment(a.x,a.y,b.x,b.y,d.x,d.y))return true;
+    if(Math.abs(o3)<.001&&onSegment(c.x,c.y,d.x,d.y,a.x,a.y))return true;
+    if(Math.abs(o4)<.001&&onSegment(c.x,c.y,d.x,d.y,b.x,b.y))return true;
+    return false;
+  }
+
+  function pointSegmentDistanceSquared(point,a,b){
+    const dx=b.x-a.x;
+    const dy=b.y-a.y;
+    const lengthSquared=dx*dx+dy*dy;
+
+    if(lengthSquared<.0001){
+      return (point.x-a.x)**2+(point.y-a.y)**2;
+    }
+
+    const amount=clamp(
+      ((point.x-a.x)*dx+(point.y-a.y)*dy)/lengthSquared,
+      0,
+      1
+    );
+
+    const nearestX=a.x+dx*amount;
+    const nearestY=a.y+dy*amount;
+    return (point.x-nearestX)**2+(point.y-nearestY)**2;
+  }
+
+  function segmentDistanceSquared(a,b,c,d){
+    if(segmentsIntersect(a,b,c,d))return 0;
+
+    return Math.min(
+      pointSegmentDistanceSquared(a,c,d),
+      pointSegmentDistanceSquared(b,c,d),
+      pointSegmentDistanceSquared(c,a,b),
+      pointSegmentDistanceSquared(d,a,b)
+    );
+  }
+
+  function headHitsBody(victim,bodyOwner){
+    if(
+      !victim?.alive ||
+      !bodyOwner?.alive ||
+      victim===bodyOwner ||
+      bodyOwner.segments.length<7
+    ){
+      return false;
+    }
+
+    const movementStart={
+      x:Number.isFinite(victim.previousX)?victim.previousX:victim.x,
+      y:Number.isFinite(victim.previousY)?victim.previousY:victim.y
+    };
+    const movementEnd={x:victim.x,y:victim.y};
+
+    // Skip only the actual head/neck. Never skip the whole body.
+    const neckSegments=Math.min(
+      6,
+      Math.max(3,Math.floor(bodyOwner.segments.length*.1))
+    );
+
+    const hitRadius=victim.radius+bodyOwner.radius*.52;
+    const hitRadiusSquared=hitRadius*hitRadius;
+
+    for(let i=neckSegments;i<bodyOwner.segments.length-1;i++){
+      const bodyStart=bodyOwner.segments[i];
+      const bodyEnd=bodyOwner.segments[i+1];
+
+      if(
+        !Number.isFinite(bodyStart.x) ||
+        !Number.isFinite(bodyStart.y) ||
+        !Number.isFinite(bodyEnd.x) ||
+        !Number.isFinite(bodyEnd.y)
+      ){
+        continue;
+      }
+
+      if(
+        segmentDistanceSquared(
+          movementStart,
+          movementEnd,
+          bodyStart,
+          bodyEnd
+        )<=hitRadiusSquared
+      ){
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   function checkCollisions(){
     if(!player?.alive)return;
 
-    const snakes=[player,...remotes.values()].filter(s=>s.alive);
+    const snakes=[player,...remotes.values()].filter(snake=>snake.alive);
 
-    for(const victim of snakes){
+    // Local player first, so death freezes instantly.
+    for(const bodyOwner of snakes){
+      if(bodyOwner===player)continue;
+
+      if(headHitsBody(player,bodyOwner)){
+        reportCollision(player);
+        return;
+      }
+    }
+
+    // Visible remote entities can also hit other bodies.
+    for(const victim of remotes.values()){
+      if(!victim.alive)continue;
+
       for(const bodyOwner of snakes){
-        if(victim===bodyOwner || !victim.alive || !bodyOwner.alive)continue;
+        if(bodyOwner===victim||!bodyOwner.alive)continue;
 
-        // Skip the head and neck area. Head-to-head contact does not count
-        // as running into somebody's body.
-        const startIndex=Math.max(
-          10,
-          Math.ceil((victim.radius+bodyOwner.radius)*1.5)
-        );
-
-        for(let i=startIndex;i<bodyOwner.segments.length;i+=2){
-          const segment=bodyOwner.segments[i];
-          const hitRadius=victim.radius+bodyOwner.radius*.5;
-
-          if((segment.x-victim.x)**2+(segment.y-victim.y)**2<hitRadius**2){
-            reportCollision(victim);
-            if(victim===player)return;
-            break;
-          }
+        if(headHitsBody(victim,bodyOwner)){
+          reportCollision(victim);
+          break;
         }
       }
     }
@@ -676,6 +807,8 @@
     const boosting=input.boost&&player.length>20;
     const desiredSpeed=155*(boosting?1.72:1);
     player.speed+=(desiredSpeed-player.speed)*Math.min(1,dt*9);
+    player.previousX=player.x;
+    player.previousY=player.y;
     player.x+=Math.cos(player.angle)*player.speed*dt;
     player.y+=Math.sin(player.angle)*player.speed*dt;
     player.x=clamp(player.x,25,WORLD-25);player.y=clamp(player.y,25,WORLD-25);
@@ -686,6 +819,8 @@
     updateSegments(player);
 
     for(const snake of remotes.values()){
+      snake.previousX=snake.x;
+      snake.previousY=snake.y;
       const dx=snake.netX-snake.x;
       const dy=snake.netY-snake.y;
       const distance=Math.hypot(dx,dy);
